@@ -6,6 +6,11 @@
 
 #include <stb_image.h>
 
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
 #include <vector>
 #include <filesystem>
 #include <chrono>
@@ -19,8 +24,6 @@ constexpr float ToRadians = Pi / 180.0f;
 constexpr float ToDegrees = 180.0f / Pi;
 
 static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
-static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
-static void MouseMoveCallback(GLFWwindow* window, double x, double y);
 static void WheelCallback(GLFWwindow* window, double x, double y);
 
 static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
@@ -75,7 +78,10 @@ struct Camera
 uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vector<const char*>& defines)
 {
 	FILE* file = fopen(filename, "r");
-	if (!file) { return 0; }
+	if (!file)
+	{
+		return 0;
+	}
 
 	fseek(file, SEEK_SET, SEEK_END);
 	long filesize = ftell(file);
@@ -90,7 +96,10 @@ uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vecto
 
 	std::vector<std::string> completeShader;
 	completeShader.push_back("#version 450\n");
-	for (const auto& define : defines) { completeShader.push_back(std::string("#define ") + define + "\n"); }
+	for (const auto& define : defines)
+	{
+		completeShader.push_back(std::string("#define ") + define + "\n");
+	}
 	completeShader.push_back(std::move(src));
 
 	char** finalSrc = new char*[completeShader.size()];
@@ -108,7 +117,10 @@ uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vecto
 	int compiled = GL_FALSE;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
 
-	for (size_t i = 0; i < completeShader.size(); ++i) { delete[] finalSrc[i]; }
+	for (size_t i = 0; i < completeShader.size(); ++i)
+	{
+		delete[] finalSrc[i];
+	}
 	delete[] finalSrc;
 
 	if (!compiled)
@@ -143,7 +155,10 @@ public:
 		program.m_defines = defines;
 		program.m_shaders.push_back({GL_VERTEX_SHADER, vsfile, std::filesystem::last_write_time(vsfile)});
 
-		if (fsfile != nullptr) { program.m_shaders.push_back({GL_FRAGMENT_SHADER, fsfile, std::filesystem::last_write_time(fsfile)}); }
+		if (fsfile != nullptr)
+		{
+			program.m_shaders.push_back({GL_FRAGMENT_SHADER, fsfile, std::filesystem::last_write_time(fsfile)});
+		}
 
 		program.Build();
 
@@ -179,7 +194,10 @@ public:
 			}
 		}
 
-		if (needsUpdate) { Build(); }
+		if (needsUpdate)
+		{
+			Build();
+		}
 	}
 
 	void Bind() { glUseProgram(m_id); }
@@ -199,13 +217,19 @@ private:
 	{
 		std::vector<GLuint> shaders;
 
-		for (const auto& shader : m_shaders) { shaders.push_back(CompileShader(shader.filename, shader.type, m_defines)); }
+		for (const auto& shader : m_shaders)
+		{
+			shaders.push_back(CompileShader(shader.filename, shader.type, m_defines));
+		}
 
 		GLuint program = glCreateProgram();
 
 		for (GLuint shader : shaders)
 		{
-			if (glIsShader(shader)) { glAttachShader(program, shader); }
+			if (glIsShader(shader))
+			{
+				glAttachShader(program, shader);
+			}
 		}
 
 		glLinkProgram(program);
@@ -296,7 +320,10 @@ GLuint LoadTexture(const char* filename)
 		int      w, h, c;
 		uint8_t* data = stbi_load(filename, &w, &h, &c, 0);
 
-		if (data == nullptr) { return 0; }
+		if (data == nullptr)
+		{
+			return 0;
+		}
 
 		GLuint texture;
 		glCreateTextures(GL_TEXTURE_2D, 1, &texture);
@@ -366,10 +393,14 @@ struct Material
 
 	void Bind(Program* program)
 	{
-		if (m_hasAlbedo) program->SetUniform("u_albedo", m_albedo);
-		if (m_hasRoughness) program->SetUniform("u_roughness", m_roughness);
-		if (m_hasMetallic) program->SetUniform("u_metallic", m_metallic);
-		if (m_hasEmissive) program->SetUniform("u_emissive", m_emissive);
+		if (m_hasAlbedo)
+			program->SetUniform("u_albedo", m_albedo);
+		if (m_hasRoughness)
+			program->SetUniform("u_roughness", m_roughness);
+		if (m_hasMetallic)
+			program->SetUniform("u_metallic", m_metallic);
+		if (m_hasEmissive)
+			program->SetUniform("u_emissive", m_emissive);
 
 		GLuint index = 0;
 
@@ -493,16 +524,46 @@ private:
 	{
 		if (m_defines.empty())
 		{
-			if (m_hasAlbedo) { m_defines.push_back("HAS_ALBEDO"); }
-			if (m_hasAlbedoTexture) { m_defines.push_back("HAS_ALBEDO_TEXTURE"); }
-			if (m_hasRoughness) { m_defines.push_back("HAS_ROUGHNESS"); }
-			if (m_hasRoughnessTexture) { m_defines.push_back("HAS_ROUGHNESS_TEXTURE"); }
-			if (m_hasMetallic) { m_defines.push_back("HAS_METALLIC"); }
-			if (m_hasMetallicTexture) { m_defines.push_back("HAS_METALLIC_TEXTURE"); }
-			if (m_hasEmissive) { m_defines.push_back("HAS_EMISSIVE"); }
-			if (m_hasEmissiveTexture) { m_defines.push_back("HAS_EMISSIVE_TEXTURE"); }
-			if (m_hasNormalMap) { m_defines.push_back("HAS_NORMAL_MAP"); }
-			if (m_hasAmbientOcclusionMap) { m_defines.push_back("HAS_AMBIENT_OCCLUSION_MAP"); }
+			if (m_hasAlbedo)
+			{
+				m_defines.push_back("HAS_ALBEDO");
+			}
+			if (m_hasAlbedoTexture)
+			{
+				m_defines.push_back("HAS_ALBEDO_TEXTURE");
+			}
+			if (m_hasRoughness)
+			{
+				m_defines.push_back("HAS_ROUGHNESS");
+			}
+			if (m_hasRoughnessTexture)
+			{
+				m_defines.push_back("HAS_ROUGHNESS_TEXTURE");
+			}
+			if (m_hasMetallic)
+			{
+				m_defines.push_back("HAS_METALLIC");
+			}
+			if (m_hasMetallicTexture)
+			{
+				m_defines.push_back("HAS_METALLIC_TEXTURE");
+			}
+			if (m_hasEmissive)
+			{
+				m_defines.push_back("HAS_EMISSIVE");
+			}
+			if (m_hasEmissiveTexture)
+			{
+				m_defines.push_back("HAS_EMISSIVE_TEXTURE");
+			}
+			if (m_hasNormalMap)
+			{
+				m_defines.push_back("HAS_NORMAL_MAP");
+			}
+			if (m_hasAmbientOcclusionMap)
+			{
+				m_defines.push_back("HAS_AMBIENT_OCCLUSION_MAP");
+			}
 		}
 
 		return m_defines;
@@ -629,6 +690,23 @@ struct Model
 
 static Camera g_camera;
 
+void SetupUI(GLFWwindow* window);
+void RenderUI(std::vector<Model>* models);
+
+float g_lastScroll = 0.0f;
+
+GLuint Render(std::vector<Model>* models, const glm::vec2& size);
+
+GLuint fbos[2];
+GLuint rts[3];
+
+#define msaaFramebuffer fbos[0]
+#define resolveFramebuffer fbos[1]
+
+GLuint msaaRenderTexture;
+GLuint msaaDepthRenderBuffer;
+GLuint resolveTexture;
+
 int main()
 {
 	glfwInit();
@@ -645,9 +723,9 @@ int main()
 
 	GLFWwindow* window = glfwCreateWindow(1024, 768, "Viewer", nullptr, nullptr);
 
-	glfwSetKeyCallback(window, KeyCallback);
-	glfwSetMouseButtonCallback(window, MouseButtonCallback);
-	glfwSetCursorPosCallback(window, MouseMoveCallback);
+	// glfwSetKeyCallback(window, KeyCallback);
+	// glfwSetMouseButtonCallback(window, MouseButtonCallback);
+	// glfwSetCursorPosCallback(window, MouseMoveCallback);
 	glfwSetScrollCallback(window, WheelCallback);
 	glfwSetFramebufferSizeCallback(window, FramebufferSizeCallback);
 	// glfwSetDropCallback(window, DropCallback);
@@ -656,7 +734,12 @@ int main()
 
 	glfwGetFramebufferSize(window, &g_width, &g_height);
 
-	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) { return 1; }
+	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+	{
+		return 1;
+	}
+
+	SetupUI(window);
 
 	std::vector<Vertex> vertices = {
 	    {{-0.5, -0.5, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0}},
@@ -690,25 +773,146 @@ int main()
 	    .worldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(0.75f, 0.0f, 0.0f)),
 	});
 
+	double lastX, lastY;
+	bool   movingCamera = false;
+
 	while (!glfwWindowShouldClose(window))
 	{
-		glfwPollEvents();
+		ImGuiIO& io = ImGui::GetIO();
+		if (!io.WantCaptureMouse)
+		{
+			if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !movingCamera)
+			{
+				movingCamera = true;
+				glfwGetCursorPos(window, &lastX, &lastY);
+			}
+			else if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_RELEASE && movingCamera)
+			{
+				movingCamera = false;
+			}
+		}
 
-		for (auto&& program : g_programs) { program.second.Update(); }
+		if (!io.WantSetMousePos && movingCamera)
+		{
+			double x, y;
+			glfwGetCursorPos(window, &x, &y);
 
-		glViewport(0, 0, g_width, g_height);
+			const double dx = 0.1f * (x - lastX);
+			const double dy = 0.1f * (y - lastY);
 
-		glClearColor(0.1f, 0.6f, 0.4f, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			g_camera.phi += dx;
+			g_camera.theta = Clamp(g_camera.theta + (float)dy, 10.0f, 170.0f);
 
-		RenderContext context = {
-		    .view = g_camera.GetView(),
-		    .proj = glm::perspective(60.0f * ToRadians, (float)g_width / g_height, 0.1f, 100.0f),
-		};
+			lastX = x;
+			lastY = y;
+		}
 
-		for (auto&& model : models) { model.Draw(&context); }
+		if (!io.WantCaptureMouse && g_lastScroll != 0.0f)
+		{
+			constexpr float minDistance = 0.2f;
+			constexpr float maxDistance = 100.0f;
+
+			const float multiplier = 2.5f * (g_camera.distance - minDistance) / (maxDistance - minDistance);
+
+			const float distance = g_camera.distance - (float)g_lastScroll * multiplier;
+
+			g_camera.distance = Clamp(distance, 0.2f, 100.0f);
+		}
+
+		g_lastScroll = 0.0f;
+
+		ImGui_ImplOpenGL3_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+
+		static bool               showDemo        = true;
+		static ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_None;
+
+		// We are using the ImGuiWindowFlags_NoDocking flag to make the parent window not dockable into,
+		// because it would be confusing to have two docking targets within each others.
+		ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
+		ImGuiViewport*   viewport     = ImGui::GetMainViewport();
+		ImGui::SetNextWindowPos(viewport->GetWorkPos());
+		ImGui::SetNextWindowSize(viewport->GetWorkSize());
+		ImGui::SetNextWindowViewport(viewport->ID);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+		window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+		window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+
+		// When using ImGuiDockNodeFlags_PassthruCentralNode, DockSpace() will render our background
+		// and handle the pass-thru hole, so we ask Begin() to not render a background.
+		if (dockspace_flags & ImGuiDockNodeFlags_PassthruCentralNode)
+			window_flags |= ImGuiWindowFlags_NoBackground;
+
+		// Important: note that we proceed even if Begin() returns false (aka window is collapsed).
+		// This is because we want to keep our DockSpace() active. If a DockSpace() is inactive,
+		// all active windows docked into it will lose their parent and become undocked.
+		// We cannot preserve the docking relationship between an active window and an inactive docking, otherwise
+		// any change of dockspace/settings would lead to windows being stuck in limbo and never being visible.
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("DockSpace Demo", nullptr, window_flags);
+		ImGui::PopStyleVar();
+
+		ImGui::PopStyleVar(2);
+
+		// DockSpace
+		// ImGuiIO& io = ImGui::GetIO();
+		ImGuiID dockspace_id = ImGui::GetID("###Dockspace");
+
+		if (ImGui::DockBuilderGetNode(dockspace_id) == nullptr)
+		{
+			ImGui::DockBuilderRemoveNode(dockspace_id);
+			ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+			ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2(g_width, g_height));
+
+			ImGuiID dockMainID  = dockspace_id;
+			ImGuiID dockIDLeft  = ImGui::DockBuilderSplitNode(dockMainID, ImGuiDir_Left, 0.20f, nullptr, &dockMainID);
+			ImGuiID dockIDRight = ImGui::DockBuilderSplitNode(dockMainID, ImGuiDir_Right, 0.20f, nullptr, &dockMainID);
+
+			ImGui::DockBuilderDockWindow("Viewport", dockMainID);
+			ImGui::DockBuilderDockWindow("Entities", dockIDLeft);
+			ImGui::DockBuilderDockWindow("Console", dockIDLeft);
+			ImGui::DockBuilderDockWindow("Properties", dockIDRight);
+		}
+
+		ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
+
+		ImGui::Begin("Viewport");
+		{
+			const glm::vec2 size(ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x,
+			                     ImGui::GetWindowContentRegionMax().y - ImGui::GetWindowContentRegionMin().y);
+
+			ImTextureID id = (void*)Render(&models, size);
+			// ImTextureID
+			ImGui::Image(id, ImVec2(size.x, size.y));
+		}
+		ImGui::End();
+
+		ImGui::Begin("Entities");
+		ImGui::End();
+
+		ImGui::Begin("Console");
+		ImGui::End();
+
+		ImGui::Begin("Properties");
+		ImGui::End();
+
+		ImGui::End();
+
+		ImGui::Render();
+		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+		{
+			GLFWwindow* backupCurrentContext = glfwGetCurrentContext();
+			ImGui::UpdatePlatformWindows();
+			ImGui::RenderPlatformWindowsDefault();
+			glfwMakeContextCurrent(backupCurrentContext);
+		}
 
 		glfwSwapBuffers(window);
+		glfwPollEvents();
 	}
 
 	glfwTerminate();
@@ -718,57 +922,124 @@ int main()
 
 static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
-	if (key == GLFW_KEY_ESCAPE && action == GLFW_RELEASE) { glfwSetWindowShouldClose(window, GLFW_TRUE); }
-}
-
-bool   g_cameraMoving = false;
-double g_mouseX, g_mouseY;
-
-static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
-{
-	if (button == GLFW_MOUSE_BUTTON_LEFT)
+	if (key == GLFW_KEY_ESCAPE && action == GLFW_RELEASE)
 	{
-		if (action == GLFW_PRESS)
-		{
-			g_cameraMoving = true;
-			glfwGetCursorPos(window, &g_mouseX, &g_mouseY);
-		}
-		else
-		{
-			g_cameraMoving = false;
-		}
+		glfwSetWindowShouldClose(window, GLFW_TRUE);
 	}
 }
 
-static void MouseMoveCallback(GLFWwindow* window, double x, double y)
-{
-	if (g_cameraMoving)
-	{
-		const double dx = 0.1f * (x - g_mouseX);
-		const double dy = 0.1f * (y - g_mouseY);
-
-		g_camera.phi += dx;
-		g_camera.theta = Clamp(g_camera.theta + (float)dy, 10.0f, 170.0f);
-
-		g_mouseX = x;
-		g_mouseY = y;
-	}
-}
-
-static void WheelCallback(GLFWwindow* window, double x, double y)
-{
-	constexpr float minDistance = 0.2f;
-	constexpr float maxDistance = 100.0f;
-
-	const float multiplier = 2.5f * (g_camera.distance - minDistance) / (maxDistance - minDistance);
-
-	const float distance = g_camera.distance - (float)y * multiplier;
-
-	g_camera.distance = Clamp(distance, 0.2f, 100.0f);
-}
+static void WheelCallback(GLFWwindow* window, double x, double y) { g_lastScroll = y; }
 
 static void FramebufferSizeCallback(GLFWwindow* window, int width, int height)
 {
 	g_width  = width;
 	g_height = height;
+}
+
+void SetupUI(GLFWwindow* window)
+{
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+	ImGui::StyleColorsDark();
+
+	ImGuiStyle& style = ImGui::GetStyle();
+	if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+	{
+		style.WindowRounding              = 0.0f;
+		style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+	}
+
+	ImGui_ImplGlfw_InitForOpenGL(window, true);
+	ImGui_ImplOpenGL3_Init("#version 450");
+}
+
+GLuint Render(std::vector<Model>* models, const glm::vec2& size)
+{
+	static auto lastSize = glm::vec2(0, 0);
+
+	// FIXME: Be smart about this
+	if (!glIsFramebuffer(msaaFramebuffer))
+	{
+		glCreateFramebuffers(2, fbos);
+	}
+
+	if (lastSize != size)
+	{
+		if (glIsTexture(msaaRenderTexture))
+		{
+			glDeleteTextures(1, &msaaRenderTexture);
+			glDeleteTextures(1, &resolveTexture);
+			glDeleteRenderbuffers(1, &msaaDepthRenderBuffer);
+		}
+
+		// Create MSAA texture and attach it to FBO
+		glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE, 1, &msaaRenderTexture);
+		glTextureStorage2DMultisample(msaaRenderTexture, 4, GL_RGB8, size.x, size.y, GL_TRUE);
+		glNamedFramebufferTexture(msaaFramebuffer, GL_COLOR_ATTACHMENT0, msaaRenderTexture, 0);
+
+		// Create MSAA DS rendertarget and attach it to FBO
+		glCreateRenderbuffers(1, &msaaDepthRenderBuffer);
+		glNamedRenderbufferStorageMultisample(msaaDepthRenderBuffer, 4, GL_DEPTH24_STENCIL8, size.x, size.y);
+		glNamedFramebufferRenderbuffer(msaaFramebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msaaDepthRenderBuffer);
+
+		if (glCheckNamedFramebufferStatus(msaaFramebuffer, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			fprintf(stderr, "MSAA framebuffer incomplete\n");
+		}
+
+		glCreateTextures(GL_TEXTURE_2D, 1, &resolveTexture);
+		glTextureStorage2D(resolveTexture, 1, GL_RGB8, size.x, size.y);
+		glNamedFramebufferTexture(resolveFramebuffer, GL_COLOR_ATTACHMENT0, resolveTexture, 0);
+
+		if (glCheckNamedFramebufferStatus(resolveFramebuffer, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			fprintf(stderr, "Resolve framebuffer incomplete\n");
+		}
+
+		lastSize = size;
+	}
+
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, msaaFramebuffer);
+
+	for (auto&& program : g_programs)
+	{
+		program.second.Update();
+	}
+
+	glViewport(0, 0, size.x, size.y);
+
+	glClearColor(0.1f, 0.6f, 0.4f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	RenderContext context = {
+	    .view = g_camera.GetView(),
+	    .proj = glm::perspective(60.0f * ToRadians, (float)size.x / size.y, 0.1f, 100.0f),
+	};
+
+	for (auto&& model : *models)
+	{
+		model.Draw(&context);
+	}
+
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+	glBlitNamedFramebuffer(msaaFramebuffer,
+	                       resolveFramebuffer,
+	                       0,
+	                       0,
+	                       size.x,
+	                       size.y,
+	                       0,
+	                       0,
+	                       size.x,
+	                       size.y,
+	                       GL_COLOR_BUFFER_BIT,
+	                       GL_NEAREST);
+
+	return resolveTexture;
 }
