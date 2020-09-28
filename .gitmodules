@@ -13,3 +13,6 @@
 [submodule "external/imgui"]
 	path = external/imgui
 	url = https://github.com/ocornut/imgui
+[submodule "external/glTF-Sample-Models"]
+	path = external/glTF-Sample-Models
+	url = https://github.com/KhronosGroup/glTF-Sample-Models
