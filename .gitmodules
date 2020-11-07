@@ -16,3 +16,6 @@
 [submodule "external/glTF-Sample-Models"]
 	path = external/glTF-Sample-Models
 	url = https://github.com/KhronosGroup/glTF-Sample-Models
+[submodule "external/assimp"]
+	path = external/assimp
+	url = https://github.com/assimp/assimp.git

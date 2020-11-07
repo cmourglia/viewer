@@ -7,19 +7,23 @@
 
 #include <stb_image.h>
 
-#include <tiny_gltf.h>
-
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include "imfilebrowser.h"
 
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+#include <assimp/pbrmaterial.h>
+
 #include <vector>
 #include <filesystem>
 #include <chrono>
 #include <unordered_map>
 #include <unordered_set>
+#include <filesystem>
 
 #include <stdio.h>
 
@@ -36,6 +40,10 @@ static void WheelCallback(GLFWwindow* window, double x, double y);
 static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
 
 static void DropCallback(GLFWwindow* window, int count, const char** paths);
+
+void RenderCube();
+
+void DebugOutput(GLenum source, GLenum type, uint32_t id, GLenum severity, GLsizei length, const char* message, const void* userParam);
 
 static int g_width, g_height;
 
@@ -57,6 +65,11 @@ inline constexpr T Clamp(T x, T a, T b)
 	return Min(b, Max(x, a));
 }
 
+std::string GetFileExtension(const std::string& filename)
+{
+	return filename.substr(filename.find_last_of(".") + 1);
+}
+
 struct Vertex
 {
 	glm::vec3 position;
@@ -70,17 +83,21 @@ struct Camera
 	float theta    = 90.0f;
 	float distance = 1.0f;
 
+	glm::vec3 position;
+	glm::vec3 center;
+	glm::vec3 up;
+
 	glm::mat4 GetView()
 	{
 		const float x = distance * sinf(theta * ToRadians) * sinf(phi * ToRadians);
 		const float y = distance * cosf(theta * ToRadians);
 		const float z = distance * sinf(theta * ToRadians) * cosf(phi * ToRadians);
 
-		const auto pos    = glm::vec3(x, y, z);
-		const auto center = glm::vec3(0.0f, 0.0f, 0.0f);
-		const auto up     = glm::vec3(0.0f, 1.0f, 0.0f);
+		position = glm::vec3(x, y, z);
+		center   = glm::vec3(0.0f, 0.0f, 0.0f);
+		up       = glm::vec3(0.0f, 1.0f, 0.0f);
 
-		return glm::lookAt(pos, center, up);
+		return glm::lookAt(position, center, up);
 	}
 };
 
@@ -121,6 +138,7 @@ uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vecto
 	uint32_t shader = glCreateShader(shaderType);
 
 	glShaderSource(shader, completeShader.size(), finalSrc, nullptr);
+	GLenum error = glGetError();
 	glCompileShader(shader);
 
 	int compiled = GL_FALSE;
@@ -256,9 +274,29 @@ private:
 	{
 		std::vector<GLuint> shaders;
 
+		bool allValid = true;
+
 		for (const auto& shader : m_shaders)
 		{
-			shaders.push_back(CompileShader(shader.filename, shader.type, m_defines));
+			GLuint shaderID = CompileShader(shader.filename, shader.type, m_defines);
+			if (glIsShader(shaderID))
+			{
+				shaders.push_back(shaderID);
+			}
+			else
+			{
+				allValid = false;
+				break;
+			}
+		}
+
+		if (!allValid)
+		{
+			for (auto shader : shaders)
+			{
+				glDeleteShader(shader);
+			}
+			return;
 		}
 
 		GLuint program = glCreateProgram();
@@ -331,7 +369,8 @@ private:
 
 	GLint GetLocation(const char* name) const
 	{
-		return m_uniforms.contains(name) ? m_uniforms.at(name) : -1;
+		auto it = m_uniforms.find(name);
+		return (it == m_uniforms.end()) ? -1 : it->second;
 	}
 
 private:
@@ -351,61 +390,280 @@ private:
 };
 
 static std::unordered_map<uint32_t, Program>   g_programs;
-static std::unordered_map<const char*, GLuint> g_textures;
+static std::unordered_map<std::string, GLuint> g_textures;
 
-GLuint LoadTexture(const char* filename)
+GLuint LoadTexture(const std::string& filename)
 {
-	if (!g_textures.contains(filename))
+	auto it = g_textures.find(filename);
+	if (it != g_textures.end())
 	{
-		stbi_set_flip_vertically_on_load(true);
-
-		int      w, h, c;
-		uint8_t* data = stbi_load(filename, &w, &h, &c, 0);
-
-		stbi_set_flip_vertically_on_load(false);
-
-		if (data == nullptr)
-		{
-			return 0;
-		}
-
-		GLuint texture;
-		glCreateTextures(GL_TEXTURE_2D, 1, &texture);
-
-		const int levels = log2f(Min(w, h));
-
-		GLenum format, internalFormat;
-		switch (c)
-		{
-			case 1:
-				format         = GL_R;
-				internalFormat = GL_R8;
-				break;
-			case 2:
-				format         = GL_RG;
-				internalFormat = GL_RG8;
-				break;
-			case 3:
-				format         = GL_RGB;
-				internalFormat = GL_RGB8;
-				break;
-			case 4:
-				format         = GL_RGBA;
-				internalFormat = GL_RGBA8;
-				break;
-		}
-
-		glTextureStorage2D(texture, levels, internalFormat, w, h);
-		glTextureSubImage2D(texture, 0, 0, 0, w, h, format, GL_UNSIGNED_BYTE, data);
-		glGenerateTextureMipmap(texture);
-
-		stbi_image_free(data);
-
-		g_textures[filename] = texture;
+		return it->second;
 	}
 
-	return g_textures[filename];
+	stbi_set_flip_vertically_on_load(true);
+
+	int      w, h, c;
+	uint8_t* data = stbi_load(filename.c_str(), &w, &h, &c, 0);
+
+	stbi_set_flip_vertically_on_load(false);
+
+	if (data == nullptr)
+	{
+		return 0;
+	}
+
+	GLuint texture;
+	glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+
+	const int levels = log2f(Min(w, h));
+
+	GLenum format, internalFormat;
+	switch (c)
+	{
+		case 1:
+			format         = GL_R;
+			internalFormat = GL_R8;
+			break;
+		case 2:
+			format         = GL_RG;
+			internalFormat = GL_RG8;
+			break;
+		case 3:
+			format         = GL_RGB;
+			internalFormat = GL_RGB8;
+			break;
+		case 4:
+			format         = GL_RGBA;
+			internalFormat = GL_RGBA8;
+			break;
+	}
+
+	glTextureStorage2D(texture, levels, internalFormat, w, h);
+	glTextureSubImage2D(texture, 0, 0, 0, w, h, format, GL_UNSIGNED_BYTE, data);
+	glGenerateTextureMipmap(texture);
+
+	stbi_image_free(data);
+
+	g_textures.insert(std::make_pair(filename, texture));
+
+	return texture;
 }
+
+/*
+File Structure:
+  Section     Length
+  ///////////////////
+  FILECODE    4
+  HEADER      124
+  HEADER_DX10* 20	(https://msdn.microsoft.com/en-us/library/bb943983(v=vs.85).aspx)
+  PIXELS      fseek(f, 0, SEEK_END); (ftell(f) - 128) - (fourCC == "DX10" ? 17 or 20 : 0)
+* the link tells you that this section isn't written unless its a DX10 file
+Supports DXT1, DXT3, DXT5.
+The problem with supporting DX10 is you need to know what it is used for and how opengl would use it.
+File Byte Order:
+typedef uint32_t DWORD;           // 32bits little endian
+  type   index    attribute           // description
+///////////////////////////////////////////////////////////////////////////////////////////////
+  DWORD  0        file_code;          //. always `DDS `, or 0x20534444
+  DWORD  4        size;               //. size of the header, always 124 (includes PIXELFORMAT)
+  DWORD  8        flags;              //. bitflags that tells you if data is present in the file
+                                      //      CAPS         0x1
+                                      //      HEIGHT       0x2
+                                      //      WIDTH        0x4
+                                      //      PITCH        0x8
+                                      //      PIXELFORMAT  0x1000
+                                      //      MIPMAPCOUNT  0x20000
+                                      //      LINEARSIZE   0x80000
+                                      //      DEPTH        0x800000
+  DWORD  12       height;             //. height of the base image (biggest mipmap)
+  DWORD  16       width;              //. width of the base image (biggest mipmap)
+  DWORD  20       pitchOrLinearSize;  //. bytes per scan line in an uncompressed texture, or bytes in the top level texture for a compressed
+texture
+                                      //     D3DX11.lib and other similar libraries unreliably or inconsistently provide the pitch, convert
+with
+                                      //     DX* && BC*: max( 1, ((width+3)/4) ) * block-size
+                                      //     *8*8_*8*8 && UYVY && YUY2: ((width+1) >> 1) * 4
+                                      //     (width * bits-per-pixel + 7)/8 (divide by 8 for byte alignment, whatever that means)
+  DWORD  24       depth;              //. Depth of a volume texture (in pixels), garbage if no volume data
+  DWORD  28       mipMapCount;        //. number of mipmaps, garbage if no pixel data
+  DWORD  32       reserved1[11];      //. unused
+  DWORD  76       Size;               //. size of the following 32 bytes (PIXELFORMAT)
+  DWORD  80       Flags;              //. bitflags that tells you if data is present in the file for following 28 bytes
+                                      //      ALPHAPIXELS  0x1
+                                      //      ALPHA        0x2
+                                      //      FOURCC       0x4
+                                      //      RGB          0x40
+                                      //      YUV          0x200
+                                      //      LUMINANCE    0x20000
+  DWORD  84       FourCC;             //. File format: DXT1, DXT2, DXT3, DXT4, DXT5, DX10.
+  DWORD  88       RGBBitCount;        //. Bits per pixel
+  DWORD  92       RBitMask;           //. Bit mask for R channel
+  DWORD  96       GBitMask;           //. Bit mask for G channel
+  DWORD  100      BBitMask;           //. Bit mask for B channel
+  DWORD  104      ABitMask;           //. Bit mask for A channel
+  DWORD  108      caps;               //. 0x1000 for a texture w/o mipmaps
+                                      //      0x401008 for a texture w/ mipmaps
+                                      //      0x1008 for a cube map
+  DWORD  112      caps2;              //. bitflags that tells you if data is present in the file
+                                      //      CUBEMAP           0x200     Required for a cube map.
+                                      //      CUBEMAP_POSITIVEX 0x400     Required when these surfaces are stored in a cube map.
+                                      //      CUBEMAP_NEGATIVEX 0x800     ^
+                                      //      CUBEMAP_POSITIVEY 0x1000    ^
+                                      //      CUBEMAP_NEGATIVEY 0x2000    ^
+                                      //      CUBEMAP_POSITIVEZ 0x4000    ^
+                                      //      CUBEMAP_NEGATIVEZ 0x8000    ^
+                                      //      VOLUME            0x200000  Required for a volume texture.
+  DWORD  114      caps3;              //. unused
+  DWORD  116      caps4;              //. unused
+  DWORD  120      reserved2;          //. unused
+*/
+GLuint LoadDDS(const char* path)
+{
+	// lay out variables to be used
+	uint8_t* header;
+
+	uint32_t width;
+	uint32_t height;
+	uint32_t mipMapCount;
+
+	uint32_t blockSize;
+	uint32_t format;
+
+	uint32_t w;
+	uint32_t h;
+
+	uint8_t* buffer = 0;
+
+	GLuint tid = 0;
+
+	// open the DDS file for binary reading and get file size
+	FILE* f;
+	if ((f = fopen(path, "rb")) == 0)
+	{
+		fprintf(stderr, "Could not open file %s\n", path);
+		return 0;
+	}
+
+	fseek(f, 0, SEEK_END);
+	long file_size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	// allocate new uint8_t space with 4 (file code) + 124 (header size) bytes
+	// read in 128 bytes from the file
+	header = (uint8_t*)malloc(128);
+	fread(header, 1, 128, f);
+
+	// compare the `DDS ` signature
+	if (memcmp(header, "DDS ", 4) != 0)
+	{
+		free(header);
+		fclose(f);
+		fprintf(stderr, "%s is not a dds file\n", path);
+		return 0;
+	}
+
+	// extract height, width, and amount of mipmaps - yes it is stored height then width
+	height      = (header[12]) | (header[13] << 8) | (header[14] << 16) | (header[15] << 24);
+	width       = (header[16]) | (header[17] << 8) | (header[18] << 16) | (header[19] << 24);
+	mipMapCount = (header[28]) | (header[29] << 8) | (header[30] << 16) | (header[31] << 24);
+
+	// figure out what format to use for what fourCC file type it is
+	// block size is about physical chunk storage of compressed data in file (important)
+	if (header[84] == 'D')
+	{
+		switch (header[87])
+		{
+			case '1': // DXT1
+				format    = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+				blockSize = 8;
+				break;
+			case '3': // DXT3
+				format    = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+				blockSize = 16;
+				break;
+			case '5': // DXT5
+				format    = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+				blockSize = 16;
+				break;
+			case '0': // DX10
+			          // unsupported, else will error
+			          // as it adds sizeof(struct DDS_HEADER_DXT10) between pixels
+			          // so, buffer = malloc((file_size - 128) - sizeof(struct DDS_HEADER_DXT10));
+			default:
+				free(header);
+				fclose(f);
+				fprintf(stderr, "%s is not an handled DDS format\n", path);
+				return 0;
+		}
+	}
+	else // BC4U/BC4S/ATI2/BC55/R8G8_B8G8/G8R8_G8B8/UYVY-packed/YUY2-packed unsupported
+	{
+		free(header);
+		fclose(f);
+		fprintf(stderr, "%s is not a supported DDS file\n", path);
+		return 0;
+	}
+
+	// allocate new uint8_t space with file_size - (file_code + header_size) magnitude
+	// read rest of file
+	buffer = (uint8_t*)malloc(file_size - 128);
+	if (buffer == 0)
+	{
+		free(header);
+		fclose(f);
+		fprintf(stderr, "Cannot malloc\n");
+		return 0;
+	}
+	fread(buffer, 1, file_size, f);
+
+	// prepare new incomplete texture
+	glGenTextures(1, &tid);
+
+	// bind the texture
+	// make it complete by specifying all needed parameters and ensuring all mipmaps are filled
+	glBindTexture(GL_TEXTURE_2D, tid);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1); // opengl likes array length of mipmaps
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); // don't forget to enable mipmaping
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+	// prepare some variables
+	uint32_t offset = 0;
+	uint32_t size   = 0;
+	w               = width;
+	h               = height;
+
+	// loop through sending block at a time with the magic formula
+	// upload to opengl properly, note the offset transverses the pointer
+	// assumes each mipmap is 1/2 the size of the previous mipmap
+	for (uint32_t i = 0; i < mipMapCount; i++)
+	{
+		if (w == 0 || h == 0)
+		{ // discard any odd mipmaps 0x1 0x2 resolutions
+			mipMapCount--;
+			continue;
+		}
+		size = ((w + 3) / 4) * ((h + 3) / 4) * blockSize;
+		glCompressedTexImage2D(GL_TEXTURE_2D, i, format, w, h, 0, size, buffer + offset);
+		offset += size;
+		w /= 2;
+		h /= 2;
+	}
+	// discard any odd mipmaps, ensure a complete texture
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1);
+	// unbind
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	free(buffer);
+	free(header);
+	fclose(f);
+	return tid;
+}
+
+static GLuint g_irradianceMap;
+static GLuint g_iblDFG;
 
 struct Material
 {
@@ -470,6 +728,13 @@ struct Material
 			++index;
 		}
 
+		if (hasMetallicRoughnessTexture)
+		{
+			program->SetUniform("s_metallicRoughness", index);
+			glBindTextureUnit(index, metallicRoughnessTexture);
+			++index;
+		}
+
 		if (hasEmissiveTexture)
 		{
 			program->SetUniform("s_emissive", index);
@@ -490,6 +755,14 @@ struct Material
 			glBindTextureUnit(index, ambientOcclusionMap);
 			++index;
 		}
+
+		program->SetUniform("s_irradianceMap", index);
+		glBindTextureUnit(index, g_irradianceMap);
+		++index;
+
+		program->SetUniform("s_iblDFG", index);
+		glBindTextureUnit(index, g_iblDFG);
+		++index;
 	}
 
 	Program BuildProgram()
@@ -502,25 +775,13 @@ private:
 	{
 		std::vector<const char*> defines;
 
-		if (hasAlbedo)
-		{
-			defines.push_back("HAS_ALBEDO");
-		}
 		if (hasAlbedoTexture)
 		{
 			defines.push_back("HAS_ALBEDO_TEXTURE");
 		}
-		if (hasRoughness)
-		{
-			defines.push_back("HAS_ROUGHNESS");
-		}
 		if (hasRoughnessTexture)
 		{
 			defines.push_back("HAS_ROUGHNESS_TEXTURE");
-		}
-		if (hasMetallic)
-		{
-			defines.push_back("HAS_METALLIC");
 		}
 		if (hasMetallicTexture)
 		{
@@ -591,6 +852,7 @@ private:
 
 struct RenderContext
 {
+	glm::vec3 eyePosition;
 	glm::mat4 model, view, proj;
 
 	glm::vec3 lightDirection;
@@ -600,7 +862,7 @@ void SetupShader(RenderContext* context, Material* material)
 {
 	const uint32_t mask = material->GetMask();
 
-	if (!g_programs.contains(mask))
+	if (g_programs.find(mask) == g_programs.end())
 	{
 		Program program = material->BuildProgram();
 		g_programs.emplace(std::make_pair(mask, program));
@@ -610,6 +872,7 @@ void SetupShader(RenderContext* context, Material* material)
 
 	program->Bind();
 
+	program->SetUniform("u_eye", context->eyePosition);
 	program->SetUniform("u_model", context->model);
 	program->SetUniform("u_view", context->view);
 	program->SetUniform("u_proj", context->proj);
@@ -812,7 +1075,7 @@ struct Mesh
 
 			for (const auto& entry : vertexDataInfos.layout)
 			{
-				if (!insertedData.contains(entry.data))
+				if (insertedData.find(entry.data) == insertedData.end())
 				{
 					glNamedBufferSubData(buffer, vboBasePtr, entry.dataSize, entry.data);
 
@@ -932,401 +1195,358 @@ double g_viewportW = 0.0, g_viewportH = 0.0;
 
 static std::vector<Model> g_models;
 
-void LoadNode(const tinygltf::Model& model, int nodeIdx, const glm::mat4& parentTransform)
+Mesh* ProcessMesh(aiMesh* inputMesh, const aiScene* scene)
 {
-	tinygltf::Node node = model.nodes[nodeIdx];
+	std::vector<Vertex>   vertices;
+	std::vector<uint32_t> indices;
 
-	auto AsFloat = [](const std::vector<double>& v) {
-		std::vector<float> r(v.size());
-		std::transform(v.begin(), v.end(), r.begin(), [](double d) { return (float)d; });
-		return r;
-	};
+	vertices.reserve(inputMesh->mNumVertices);
+	indices.reserve(inputMesh->mNumFaces * 3);
 
-	glm::mat4 localTransform(1.0f);
-	if (!node.matrix.empty())
+	const aiVector3D* inVertices  = inputMesh->mVertices;
+	const aiVector3D* inNormals   = inputMesh->mNormals;
+	const aiVector3D* inTexcoords = inputMesh->mTextureCoords[0];
+
+	for (uint32_t index = 0; index < inputMesh->mNumVertices; ++index)
 	{
-		localTransform = glm::make_mat4(AsFloat(node.matrix).data());
-	}
-	else
-	{
-		glm::mat4 t(1.0f), r(1.0f), s(1.0f);
+		const aiVector3D v = *inVertices++;
+		const aiVector3D n = *inNormals++;
 
-		if (!node.translation.empty())
+		Vertex vertex;
+		vertex.position = {v.x, v.y, v.z};
+		vertex.normal   = {n.x, n.y, n.z};
+
+		if (inTexcoords)
 		{
-			t = glm::translate(t, glm::make_vec3(AsFloat(node.translation).data()));
+			const aiVector3D t = *inTexcoords++;
+			vertex.texcoord    = {t.x, t.y};
 		}
 
-		if (!node.rotation.empty())
-		{
-			auto q = AsFloat(node.rotation);
-			r      = glm::mat4_cast(glm::quat(q[3], q[0], q[1], q[2]));
-		}
-
-		if (!node.scale.empty())
-		{
-			s = glm::scale(s, glm::make_vec3(AsFloat(node.scale).data()));
-		}
-
-		localTransform = s * r * t;
+		vertices.push_back(vertex);
 	}
 
-	glm::mat4 worldTransform = parentTransform * localTransform;
-
-	if (node.mesh != -1)
+	const aiFace* inFaces = inputMesh->mFaces;
+	for (uint32_t i = 0; i < inputMesh->mNumFaces; ++i)
 	{
-		tinygltf::Mesh mesh = model.meshes[node.mesh];
-		for (const auto& primitive : mesh.primitives)
+		const aiFace face = *inFaces++;
+		for (uint32_t j = 0; j < face.mNumIndices; ++j)
 		{
-			Model renderModel;
-
-			// Load mesh
-			std::vector<Vertex> vertices;
-			std::vector<GLuint> indices;
-
-			if (primitive.mode != GL_TRIANGLES)
-			{
-				fprintf(stderr, "%d primitive is not handled yet\n", primitive.mode);
-				continue;
-			}
-
-			GLsizeiptr indexBufferSize;
-			GLuint     indexCount;
-			GLenum     indexType;
-
-			const unsigned char* indexData;
-
-			tinygltf::Accessor indicesAccessor = model.accessors[primitive.indices];
-			indexType                          = indicesAccessor.componentType;
-			indexCount                         = indicesAccessor.count;
-
-			auto indexBufferView = model.bufferViews[indicesAccessor.bufferView];
-
-			indexData       = model.buffers[indexBufferView.buffer].data.data() + indexBufferView.byteOffset;
-			indexBufferSize = indexBufferView.byteLength;
-
-			Layout                  layout;
-			std::vector<GLsizeiptr> offsets;
-			GLsizei                 vertexBufferSize       = 0;
-			GLuint                  vertexBufferByteStride = 0;
-			bool                    singleBuffer           = true;
-			bool                    interleaved            = true;
-
-			const unsigned char* vertexData;
-
-			int                  vertexBufferViewIndex = -1;
-			tinygltf::BufferView vertexBufferView;
-
-			for (const auto& attribute : primitive.attributes)
-			{
-				auto GetBindingPoint = [](const std::string& attr) {
-					// clang-format off
-						 if (attr == "POSITION")   return BindingPoint_Position;
-					else if (attr == "NORMAL")     return BindingPoint_Normal;
-					else if (attr == "TANGENT")    return BindingPoint_Tangent;
-					else if (attr == "TEXCOORD_0") return BindingPoint_Texcoord0;
-					else if (attr == "TEXCOORD_1") return BindingPoint_Texcoord1;
-					else if (attr == "WEIGHTS_0")  return BindingPoint_Weights;
-					else if (attr == "JOINTS_0")   return BindingPoint_Joints;
-					// clang-format on
-
-					fprintf(stderr, "Binding point not handled: %s\n", attr.c_str());
-					return BindingPoint_Custom0;
-				};
-
-				auto GetElementType = [](int type) {
-					// clang-format off
-					switch (type)
-					{
-						case TINYGLTF_TYPE_SCALAR: return ElementType_Scalar;
-						case TINYGLTF_TYPE_VEC2:   return ElementType_Vec2;
-						case TINYGLTF_TYPE_VEC3:   return ElementType_Vec3;
-						case TINYGLTF_TYPE_VEC4:   return ElementType_Vec4;
-					}
-					// clang-format on
-					fprintf(stderr, "Element type not handled: %d\n", type);
-					return ElementType_Scalar;
-				};
-
-				tinygltf::Accessor accessor = model.accessors[attribute.second];
-
-				if (accessor.bufferView != vertexBufferViewIndex)
-				{
-					if (vertexBufferViewIndex >= 0)
-					{
-						singleBuffer = false;
-						interleaved  = false;
-					}
-
-					vertexBufferViewIndex  = accessor.bufferView;
-					vertexBufferView       = model.bufferViews[vertexBufferViewIndex];
-					vertexData             = model.buffers[vertexBufferView.buffer].data.data() + vertexBufferView.byteOffset;
-					vertexBufferByteStride = vertexBufferView.byteStride;
-
-					vertexBufferSize += vertexBufferView.byteLength;
-				}
-
-				if (accessor.byteOffset >= vertexBufferView.byteStride)
-				{
-					interleaved = false;
-				}
-
-				LayoutItem entry;
-				entry.bindingPoint = GetBindingPoint(attribute.first);
-				entry.elementType  = GetElementType(accessor.type);
-				entry.dataType     = (DataType)accessor.componentType;
-				entry.offset       = accessor.byteOffset;
-				entry.dataSize     = vertexBufferView.byteLength;
-				entry.data         = vertexData;
-
-				//    vertexData);
-				layout.push_back(entry);
-			}
-
-			VertexDataInfos vertexInfos = {
-			    .layout       = layout,
-			    .byteStride   = vertexBufferByteStride,
-			    .bufferSize   = vertexBufferSize,
-			    .interleaved  = interleaved,
-			    .singleBuffer = singleBuffer,
-			};
-
-			IndexDataInfos indexInfos = {
-			    .bufferSize = indexBufferSize,
-			    .indexCount = indexCount,
-			    .indexType  = indexType,
-			    .data       = indexData,
-			};
-
-			Mesh* renderMesh = new Mesh(vertexInfos, indexInfos);
-
-			// Load material
-
-			Material* renderMaterial;
-
-			if (primitive.material != -1)
-			{
-				tinygltf::Material material = model.materials[primitive.material];
-
-				renderMaterial = new Material(material.name.c_str(), "resources/shaders/test.vert", "resources/shaders/test.frag");
-				renderMaterial->hasAlbedo    = true;
-				renderMaterial->albedo       = glm::make_vec3(AsFloat(material.pbrMetallicRoughness.baseColorFactor).data());
-				renderMaterial->hasMetallic  = true;
-				renderMaterial->hasRoughness = true;
-				renderMaterial->metallic     = material.pbrMetallicRoughness.metallicFactor;
-				renderMaterial->roughness    = material.pbrMetallicRoughness.roughnessFactor;
-				renderMaterial->hasEmissive  = true;
-				renderMaterial->emissive     = glm::make_vec3(AsFloat(material.emissiveFactor).data());
-
-				const auto& albedoTextureInfo            = material.pbrMetallicRoughness.baseColorTexture;
-				const auto& metallicRoughnessTextureInfo = material.pbrMetallicRoughness.metallicRoughnessTexture;
-				const auto& normalTextureInfo            = material.normalTexture;
-				const auto& occlusionTextureInfo         = material.occlusionTexture;
-				const auto& emissiveTextureInfo          = material.emissiveTexture;
-
-				auto CreateTexture = [](const tinygltf::Model& model, int textureIndex) {
-					auto t       = model.textures[textureIndex];
-					auto image   = model.images[t.source];
-					auto sampler = t.sampler != -1 ? model.samplers[t.sampler] : tinygltf::Sampler();
-
-					GLuint texture;
-					glCreateTextures(GL_TEXTURE_2D, 1, &texture);
-
-					const bool hasMips = (sampler.minFilter != TINYGLTF_TEXTURE_FILTER_NEAREST);
-
-					const int levels = hasMips ? log2f(Min(image.width, image.height)) : 1;
-
-					GLenum format, internalFormat;
-					assert(image.pixel_type == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE);
-					switch (image.component)
-					{
-						case 1:
-							format         = GL_R;
-							internalFormat = GL_R8;
-							break;
-						case 2:
-							format         = GL_RG;
-							internalFormat = GL_RG8;
-							break;
-						case 3:
-							format         = GL_RGB;
-							internalFormat = GL_RGB8;
-							break;
-						case 4:
-							format         = GL_RGBA;
-							internalFormat = GL_RGBA8;
-							break;
-					}
-
-					glTextureStorage2D(texture, levels, internalFormat, image.width, image.height);
-					glTextureSubImage2D(texture, 0, 0, 0, image.width, image.height, format, image.pixel_type, image.image.data());
-
-					glTextureParameteri(texture, GL_TEXTURE_WRAP_S, sampler.wrapS);
-					glTextureParameteri(texture, GL_TEXTURE_WRAP_R, sampler.wrapR);
-					glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, sampler.minFilter != -1 ? sampler.minFilter : GL_LINEAR);
-					glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, sampler.magFilter != -1 ? sampler.magFilter : GL_LINEAR);
-
-					if (hasMips)
-					{
-						glGenerateTextureMipmap(texture);
-					}
-
-					return texture;
-				};
-
-				if (albedoTextureInfo.index != -1)
-				{
-					assert(albedoTextureInfo.texCoord == 0);
-					renderMaterial->hasAlbedoTexture = true;
-
-					renderMaterial->albedoTexture = CreateTexture(model, albedoTextureInfo.index);
-				}
-
-				if (metallicRoughnessTextureInfo.index != -1)
-				{
-					assert(metallicRoughnessTextureInfo.texCoord == 0);
-					renderMaterial->hasMetallicRoughnessTexture = true;
-
-					renderMaterial->metallicRoughnessTexture = CreateTexture(model, metallicRoughnessTextureInfo.index);
-				}
-
-				if (normalTextureInfo.index != -1)
-				{
-					assert(normalTextureInfo.texCoord == 0);
-					renderMaterial->hasNormalMap = true;
-					renderMaterial->normalMap    = CreateTexture(model, normalTextureInfo.index);
-
-					assert(normalTextureInfo.scale == 1.0f);
-				}
-
-				if (occlusionTextureInfo.index != -1)
-				{
-					assert(occlusionTextureInfo.texCoord == 0);
-					renderMaterial->hasAmbientOcclusionMap = true;
-					renderMaterial->ambientOcclusionMap    = CreateTexture(model, normalTextureInfo.index);
-				}
-
-				if (emissiveTextureInfo.index != -1)
-				{
-					assert(emissiveTextureInfo.texCoord == 0);
-					renderMaterial->hasEmissiveTexture = true;
-					renderMaterial->emissiveTexture    = CreateTexture(model, emissiveTextureInfo.index);
-				}
-			}
-			else
-			{
-				renderMaterial            = new Material("dummy", "resources/shaders/test.vert", "resources/shaders/test.frag");
-				renderMaterial->hasAlbedo = true;
-				renderMaterial->albedo    = glm::vec3(0.2f, 0.5f, 0.4f);
-			}
-
-			renderModel.mesh           = renderMesh;
-			renderModel.material       = renderMaterial;
-			renderModel.worldTransform = worldTransform;
-
-			g_models.push_back(renderModel);
+			indices.push_back(face.mIndices[j]);
 		}
 	}
 
-	for (int child : node.children)
+	Mesh* mesh = new Mesh(vertices, indices);
+
+	return mesh;
+}
+
+std::string TexturePath(const char* texture, const std::filesystem::path& path)
+{
+	std::filesystem::path texturePath(texture);
+	if (texturePath.is_absolute())
 	{
-		LoadNode(model, child, worldTransform);
+		return texturePath.string();
+	}
+
+	std::filesystem::path fullPath = path / texturePath;
+
+	return fullPath.string();
+}
+
+Material* ProcessMaterial(aiMaterial* inputMaterial, const aiScene* scene, const std::filesystem::path& path)
+{
+	Material* material = new Material(inputMaterial->GetName().C_Str(), "resources/shaders/pbr.vert", "resources/shaders/pbr.frag");
+
+	aiColor3D albedo;
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_BASE_COLOR_FACTOR, albedo))
+	{
+		material->hasAlbedo = true;
+		material->albedo    = glm::vec3(albedo.r, albedo.g, albedo.b);
+	}
+
+	float metallic;
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLIC_FACTOR, metallic))
+	{
+		material->hasMetallic = true;
+		material->metallic    = metallic;
+	}
+
+	float roughness;
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_ROUGHNESS_FACTOR, roughness))
+	{
+		material->hasRoughness = true;
+		material->roughness    = roughness;
+	}
+
+	aiString albedoTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_BASE_COLOR_TEXTURE, &albedoTexture))
+	{
+		material->hasAlbedoTexture = true;
+		material->albedoTexture    = LoadTexture(TexturePath(albedoTexture.C_Str(), path));
+	}
+
+	aiString metallicRoughnessTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE, &metallicRoughnessTexture))
+	{
+		material->hasMetallicRoughnessTexture = true;
+		material->metallicRoughnessTexture    = LoadTexture(TexturePath(metallicRoughnessTexture.C_Str(), path));
+	}
+
+	aiColor3D emissiveColor;
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor))
+	{
+		material->hasEmissive = true;
+		material->emissive    = glm::vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
+	}
+
+	aiString emissiveTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(aiTextureType_EMISSIVE, 0, &emissiveTexture))
+	{
+		material->hasEmissiveTexture = true;
+		material->emissiveTexture    = LoadTexture(TexturePath(emissiveTexture.C_Str(), path));
+	}
+
+	aiString occlusionTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(aiTextureType_LIGHTMAP, 0, &occlusionTexture))
+	{
+		material->hasAmbientOcclusionMap = true;
+		material->ambientOcclusionMap    = LoadTexture(TexturePath(occlusionTexture.C_Str(), path));
+	}
+
+	return material;
+}
+
+void ProcessNode(aiNode* node, const aiScene* scene, const glm::mat4& parentTransform, const std::filesystem::path& path)
+{
+	const auto& mat = node->mTransformation;
+
+	// clang-format off
+	const glm::mat4 nodeTransform(mat.a1, mat.b1, mat.c1, mat.d1,
+	                              mat.a2, mat.b2, mat.c2, mat.d2,
+	                              mat.a3, mat.b3, mat.c3, mat.d3,
+	                              mat.a4, mat.b4, mat.c4, mat.d4);
+	// clang-format on
+
+	const glm::mat4 transform = parentTransform * nodeTransform;
+
+	for (uint32_t index = 0; index < node->mNumMeshes; ++index)
+	{
+		Model model;
+
+		aiMesh*     inputMesh     = scene->mMeshes[node->mMeshes[index]];
+		aiMaterial* inputMaterial = scene->mMaterials[inputMesh->mMaterialIndex];
+
+		model.mesh           = ProcessMesh(scene->mMeshes[node->mMeshes[index]], scene);
+		model.material       = ProcessMaterial(inputMaterial, scene, path);
+		model.worldTransform = transform;
+		g_models.push_back(model);
+	}
+
+	for (uint32_t index = 0; index < node->mNumChildren; ++index)
+	{
+		ProcessNode(node->mChildren[index], scene, transform, path);
 	}
 }
 
-void LoadScene(const char* gltf)
+void LoadScene(const char* filename)
 {
-	std::string gltf_str(gltf);
-	auto        pos = gltf_str.find_last_of(".");
-	auto        ext = gltf_str.substr(pos);
+	Assimp::Importer importer;
 
-	tinygltf::Model    model;
-	tinygltf::TinyGLTF loader;
-	std::string        err;
-	std::string        warn;
+	const uint32_t importerFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace |
+	                               aiProcess_OptimizeMeshes;
+	const aiScene* scene = importer.ReadFile(filename, importerFlags);
 
-	bool result;
-
-	if (ext == ".gltf")
+	if ((nullptr == scene) || (0 != scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || (nullptr == scene->mRootNode))
 	{
-		result = loader.LoadASCIIFromFile(&model, &err, &warn, gltf_str);
-	}
-	else if (ext == ".glb")
-	{
-		result = loader.LoadBinaryFromFile(&model, &err, &warn, gltf_str);
-	}
-	else
-	{
-		fprintf(stderr, "%s is not a gltf file\n", gltf);
+		fprintf(stderr, "Could not load file %s\n", filename);
 		return;
 	}
 
-	if (!warn.empty())
-	{
-		fprintf(stderr, "TinyGLTF warning: %s\n", warn.c_str());
-	}
-
-	if (!err.empty())
-	{
-		fprintf(stderr, "TinyGLTF error: %s\n", err.c_str());
-	}
-
-	if (!result)
-	{
-		fprintf(stderr, "Failed to parse GLTF file %s\n", gltf);
-		return;
-	}
-
-	std::vector<int> nodes;
-
-	if (model.defaultScene != -1)
-	{
-		nodes = model.scenes[model.defaultScene].nodes;
-	}
-	else
-	{
-		if (!model.scenes.empty())
-		{
-			nodes = model.scenes[0].nodes;
-		}
-		else
-		{
-			if (!model.nodes.empty())
-			{
-				std::unordered_set<int> parentedNodes;
-				for (const auto& node : model.nodes)
-				{
-					for (int child : node.children)
-					{
-						parentedNodes.insert(child);
-					}
-				}
-
-				for (int i = 0; i < (int)model.nodes.size(); ++i)
-				{
-					if (!parentedNodes.contains(i))
-					{
-						nodes.push_back(i);
-					}
-				}
-			}
-		}
-	}
-
-	if (nodes.empty())
-	{
-		fprintf(stderr, "No nodes found, ignoring scene.\n");
-		return;
-	}
-
-	g_models.clear();
-
-	for (int node : nodes)
-	{
-		LoadNode(model, node, glm::mat4(1.0f));
-	}
+	std::filesystem::path p;
+	p = filename;
+	p.remove_filename();
+	ProcessNode(scene->mRootNode, scene, glm::mat4(1.0f), p);
 }
 
-glm::vec3 g_lightDirection = glm::vec3(0, -1, 0);
+static Program g_equirectangularToCubemapProgram;
+static Program g_irradianceProgram;
+static Program g_backgroundProgram;
+static Mesh    g_cubeMesh;
+static GLuint  g_envCubeMap;
+
+void LoadEnvironment(const char* filename)
+{
+	stbi_set_flip_vertically_on_load(true);
+
+	int    w, h, c;
+	float* data = stbi_loadf(filename, &w, &h, &c, 0);
+
+	stbi_set_flip_vertically_on_load(false);
+
+	if (data == nullptr)
+	{
+		return;
+	}
+
+	GLuint equirectangularTexture;
+	glCreateTextures(GL_TEXTURE_2D, 1, &equirectangularTexture);
+
+	const int levels = log2f(Min(w, h));
+
+	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
+	glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
+	glTextureSubImage2D(equirectangularTexture, 0, 0, 0, w, h, GL_RGB, GL_FLOAT, data);
+	glTextureParameteri(equirectangularTexture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(equirectangularTexture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(equirectangularTexture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTextureParameteri(equirectangularTexture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	stbi_image_free(data);
+
+	if (glIsTexture(g_envCubeMap))
+	{
+		glDeleteTextures(1, &g_envCubeMap);
+	}
+
+	glGenTextures(1, &g_envCubeMap);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
+
+	// glTextureStorage2D(g_envCubeMap, 1, GL_RGB32F, 512, 512);
+	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+	for (int face = 0; face < 6; ++face)
+	{
+		// face:
+		// 0 -> positive x
+		// 1 -> negative x
+		// 2 -> positive y
+		// 3 -> negative y
+		// 4 -> positive z
+		// 5 -> negative z
+		// glTextureSubImage3D(g_envCubeMap, 0, 0, 0, face, 512, 512, 1, GL_RGB, GL_HALF_FLOAT, nullptr);
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
+	}
+
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	// clang-format off
+	const glm::mat4 captureProjection = glm::perspective(Pi * 0.5f, 1.0f, 0.1f, 10.0f);
+	const glm::mat4 captureViews[]    = {
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+    };
+	// clang-format on
+
+	GLuint captureFBO, captureRBO;
+	glGenFramebuffers(1, &captureFBO);
+	glGenRenderbuffers(1, &captureRBO);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+	glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+	g_equirectangularToCubemapProgram.Bind();
+	g_equirectangularToCubemapProgram.SetUniform("equirectangularMap", 0);
+	glBindTextureUnit(0, equirectangularTexture);
+	g_equirectangularToCubemapProgram.SetUniform("proj", captureProjection);
+	glViewport(0, 0, 512, 512);
+
+	glDepthFunc(GL_ALWAYS);
+	for (int face = 0; face < 6; ++face)
+	{
+		g_equirectangularToCubemapProgram.SetUniform("view", captureViews[face]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_envCubeMap, 0);
+
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClearDepth(1.0f);
+		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
+		// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
+
+		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			fprintf(stderr, "framebuffer incomplete\n");
+		}
+
+		RenderCube();
+	}
+	glDepthFunc(GL_LESS);
+
+	if (glIsTexture(g_irradianceMap))
+	{
+		glDeleteTextures(1, &g_irradianceMap);
+	}
+
+	glGenTextures(1, &g_irradianceMap);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_irradianceMap);
+
+	for (int face = 0; face < 6; ++face)
+	{
+		// face:
+		// 0 -> positive x
+		// 1 -> negative x
+		// 2 -> positive y
+		// 3 -> negative y
+		// 4 -> positive z
+		// 5 -> negative z
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, 64, 64, 0, GL_RGB, GL_FLOAT, nullptr);
+	}
+
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 64, 64);
+
+	g_irradianceProgram.Bind();
+	g_irradianceProgram.SetUniform("envMap", 0);
+	glBindTextureUnit(0, g_envCubeMap);
+	g_irradianceProgram.SetUniform("proj", captureProjection);
+	glViewport(0, 0, 64, 64);
+
+	glDepthFunc(GL_ALWAYS);
+	for (int face = 0; face < 6; ++face)
+	{
+		g_irradianceProgram.SetUniform("view", captureViews[face]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_irradianceMap, 0);
+
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClearDepth(1.0f);
+		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
+		// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
+
+		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			fprintf(stderr, "framebuffer incomplete\n");
+		}
+
+		RenderCube();
+	}
+	glDepthFunc(GL_LESS);
+
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	glDeleteRenderbuffers(1, &captureRBO);
+	glDeleteFramebuffers(1, &captureFBO);
+}
+
+glm::vec3 g_lightDirection    = glm::vec3(0, -1, 0);
+bool      g_showIrradianceMap = false;
 
 int main()
 {
@@ -1352,6 +1572,7 @@ int main()
 	glfwSetDropCallback(window, DropCallback);
 
 	glfwMakeContextCurrent(window);
+	glfwSwapInterval(0);
 
 	glfwGetFramebufferSize(window, &g_width, &g_height);
 
@@ -1360,42 +1581,29 @@ int main()
 		return 1;
 	}
 
+#if _DEBUG
+	glEnable(GL_DEBUG_OUTPUT);
+	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+	glDebugMessageCallback(DebugOutput, nullptr);
+	glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+#endif
+
 	SetupUI(window);
 
-	std::vector<Vertex> vertices = {
-	    {{-0.5, -0.5, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0}},
-	    {{0.5, -0.5, 0.0}, {0.0, 0.0, 0.0}, {1.0, 0.0}},
-	    {{0.5, 0.5, 0.0}, {0.0, 0.0, 0.0}, {1.0, 1.0}},
-	    {{-0.5, 0.5, 0.0}, {0.0, 0.0, 0.0}, {0.0, 1.0}},
-	};
+	// glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
-	std::vector<GLuint> indices = {0, 1, 2, 0, 2, 3};
+	g_equirectangularToCubemapProgram = Program::MakeRender("equirectangularToCubemap",
+	                                                        "resources/shaders/cubemap.vert",
+	                                                        "resources/shaders/equirectangularToCubemap.frag");
+	g_irradianceProgram = Program::MakeRender("irradiance", "resources/shaders/cubemap.vert", "resources/shaders/irradiance.frag");
+	g_backgroundProgram = Program::MakeRender("background", "resources/shaders/background.vert", "resources/shaders/background.frag");
 
-	Mesh mesh(vertices, indices);
+	g_iblDFG = LoadDDS("resources/textures/dfg.dds");
 
-	auto material1             = Material("test", "resources/shaders/test.vert", "resources/shaders/test.frag");
-	material1.hasAlbedoTexture = true;
-	material1.albedoTexture    = LoadTexture("resources/textures/grin.png");
-	material1.hasAlbedo        = true;
-	material1.albedo           = glm::vec3(1.0, 1.0, 0.0);
+	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr");
 
-	auto material2             = Material("test", "resources/shaders/test.vert", "resources/shaders/test.frag");
-	material2.hasAlbedoTexture = true;
-	material2.albedoTexture    = LoadTexture("resources/textures/image.png");
-	material2.hasAlbedo        = true;
-	material2.albedo           = glm::vec3(1.0, 0.0, 0.0);
-
-	g_models.push_back({
-	    .material       = &material1,
-	    .mesh           = &mesh,
-	    .worldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(-0.75f, 0.0f, 0.0f)),
-	});
-
-	g_models.push_back({
-	    .material       = &material2,
-	    .mesh           = &mesh,
-	    .worldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(0.75f, 0.0f, 0.0f)),
-	});
+	// LoadScene("external/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf");
+	// LoadScene(R"(W:\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
 
 	ImGui::FileBrowser textureDialog;
 	textureDialog.SetTitle("Open texture...");
@@ -1511,6 +1719,7 @@ int main()
 
 		ImGui::Begin("Light");
 		{
+			ImGui::Checkbox("Show irradiance map", &g_showIrradianceMap);
 			ImGui::InputFloat3("Light direction", &g_lightDirection.x);
 		}
 		ImGui::End();
@@ -1747,23 +1956,38 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 		program.second.Update();
 	}
 
+	g_backgroundProgram.Update();
+	g_equirectangularToCubemapProgram.Update();
+	g_irradianceProgram.Update();
+
 	glViewport(0, 0, size.x, size.y);
 
+	glClearDepth(1.0f);
 	glClearColor(0.1f, 0.6f, 0.4f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_LESS);
+	glDepthFunc(GL_LEQUAL);
 
 	RenderContext context = {
-	    .view = g_camera.GetView(),
-	    .proj = glm::perspective(60.0f * ToRadians, (float)size.x / size.y, 0.001f, 100.0f),
+	    .eyePosition = g_camera.position,
+	    .view        = g_camera.GetView(),
+	    .proj        = glm::perspective(60.0f * ToRadians, (float)size.x / size.y, 0.001f, 100.0f),
 	};
 
 	for (auto&& model : *models)
 	{
 		model.Draw(&context);
 	}
+
+	g_backgroundProgram.Bind();
+	g_backgroundProgram.SetUniform("envmap", 0);
+	g_backgroundProgram.SetUniform("view", context.view);
+	g_backgroundProgram.SetUniform("proj", context.proj);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_irradianceMap : g_envCubeMap);
+	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
+	RenderCube();
 
 	glDisable(GL_DEPTH_TEST);
 
@@ -1787,8 +2011,176 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 
 static void DropCallback(GLFWwindow* window, int count, const char** paths)
 {
-	if (count > 0)
+	for (int i = 0; i < count; ++i)
 	{
-		LoadScene(paths[0]);
+		std::string ext = GetFileExtension(paths[i]);
+		if (ext == "hdr")
+		{
+			LoadEnvironment(paths[i]);
+		}
+		else
+		{
+			LoadScene(paths[i]);
+		}
 	}
+}
+
+void RenderCube()
+{
+	static GLuint g_cubeVAO = 0;
+	static GLuint g_cubeVBO = 0;
+
+	// initialize (if necessary)
+	if (g_cubeVAO == 0)
+	{
+		// clang-format off
+        float vertices[] = {
+            // back face
+            -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 0.0f, // bottom-left
+             1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 1.0f, // top-right
+             1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 0.0f, // bottom-right
+             1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 1.0f, // top-right
+            -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 0.0f, // bottom-left
+            -1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 1.0f, // top-left
+            // front face
+            -1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 0.0f, // bottom-left
+             1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 0.0f, // bottom-right
+             1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 1.0f, // top-right
+             1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 1.0f, // top-right
+            -1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 1.0f, // top-left
+            -1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 0.0f, // bottom-left
+            // left face
+            -1.0f,  1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-right
+            -1.0f,  1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 1.0f, // top-left
+            -1.0f, -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-left
+            -1.0f, -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-left
+            -1.0f, -1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 0.0f, // bottom-right
+            -1.0f,  1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-right
+            // right face
+             1.0f,  1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-left
+             1.0f, -1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-right
+             1.0f,  1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 1.0f, // top-right
+             1.0f, -1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-right
+             1.0f,  1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-left
+             1.0f, -1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 0.0f, // bottom-left
+            // bottom face
+            -1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 1.0f, // top-right
+             1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 1.0f, // top-left
+             1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 0.0f, // bottom-left
+             1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 0.0f, // bottom-left
+            -1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 0.0f, // bottom-right
+            -1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 1.0f, // top-right
+            // top face
+            -1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 1.0f, // top-left
+             1.0f,  1.0f , 1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 0.0f, // bottom-right
+             1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 1.0f, // top-right
+             1.0f,  1.0f,  1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 0.0f, // bottom-right
+            -1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 1.0f, // top-left
+            -1.0f,  1.0f,  1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 0.0f  // bottom-left
+        };
+		// clang-format on
+
+		glGenVertexArrays(1, &g_cubeVAO);
+		glGenBuffers(1, &g_cubeVBO);
+		// fill buffer
+		glBindBuffer(GL_ARRAY_BUFFER, g_cubeVBO);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+		// link vertex attributes
+		glBindVertexArray(g_cubeVAO);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		glBindVertexArray(0);
+	}
+	// render Cube
+	glBindVertexArray(g_cubeVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 36);
+	glBindVertexArray(0);
+}
+
+void APIENTRY
+DebugOutput(GLenum source, GLenum type, uint32_t id, GLenum severity, GLsizei length, const char* message, const void* userParam)
+{
+	// ignore non-significant error/warning codes
+	if (id == 131169 || id == 131185 || id == 131218 || id == 131204)
+		return;
+
+	fprintf(stderr, "---------------\n");
+	fprintf(stderr, "Debug message (%d): %s\n", id, message);
+
+	switch (source)
+	{
+		case GL_DEBUG_SOURCE_API:
+			fprintf(stderr, "Source: API");
+			break;
+		case GL_DEBUG_SOURCE_WINDOW_SYSTEM:
+			fprintf(stderr, "Source: Window System");
+			break;
+		case GL_DEBUG_SOURCE_SHADER_COMPILER:
+			fprintf(stderr, "Source: Shader Compiler");
+			break;
+		case GL_DEBUG_SOURCE_THIRD_PARTY:
+			fprintf(stderr, "Source: Third Party");
+			break;
+		case GL_DEBUG_SOURCE_APPLICATION:
+			fprintf(stderr, "Source: Application");
+			break;
+		case GL_DEBUG_SOURCE_OTHER:
+			fprintf(stderr, "Source: Other");
+			break;
+	}
+	fprintf(stderr, "\n");
+
+	switch (type)
+	{
+		case GL_DEBUG_TYPE_ERROR:
+			fprintf(stderr, "Type: Error");
+			break;
+		case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR:
+			fprintf(stderr, "Type: Deprecated Behaviour");
+			break;
+		case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:
+			fprintf(stderr, "Type: Undefined Behaviour");
+			break;
+		case GL_DEBUG_TYPE_PORTABILITY:
+			fprintf(stderr, "Type: Portability");
+			break;
+		case GL_DEBUG_TYPE_PERFORMANCE:
+			fprintf(stderr, "Type: Performance");
+			break;
+		case GL_DEBUG_TYPE_MARKER:
+			fprintf(stderr, "Type: Marker");
+			break;
+		case GL_DEBUG_TYPE_PUSH_GROUP:
+			fprintf(stderr, "Type: Push Group");
+			break;
+		case GL_DEBUG_TYPE_POP_GROUP:
+			fprintf(stderr, "Type: Pop Group");
+			break;
+		case GL_DEBUG_TYPE_OTHER:
+			fprintf(stderr, "Type: Other");
+			break;
+	}
+	fprintf(stderr, "\n");
+
+	switch (severity)
+	{
+		case GL_DEBUG_SEVERITY_HIGH:
+			fprintf(stderr, "Severity: high");
+			break;
+		case GL_DEBUG_SEVERITY_MEDIUM:
+			fprintf(stderr, "Severity: medium");
+			break;
+		case GL_DEBUG_SEVERITY_LOW:
+			fprintf(stderr, "Severity: low");
+			break;
+		case GL_DEBUG_SEVERITY_NOTIFICATION:
+			fprintf(stderr, "Severity: notification");
+			break;
+	}
+	fprintf(stderr, "\n\n");
 }
