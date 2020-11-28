@@ -54,6 +54,7 @@ uniform sampler2D s_ambientOcclusion;
 #endif
 
 uniform samplerCube s_irradianceMap;
+uniform samplerCube s_radianceMap;
 uniform sampler2D s_iblDFG;
 
 #define PI 3.14159265359
@@ -76,6 +77,14 @@ vec3 GetAlbedo() {
 #endif
 
     return result;
+}
+
+float GetAlpha()
+{
+#ifdef HAS_ALBEDO_TEXTURE
+    return texture(s_albedo, in_texcoord).a;
+#endif
+    return 1.0f;
 }
 
 vec2 GetMetallicRoughness()
@@ -295,6 +304,11 @@ vec3 EnvDFGPolynomial(vec3 f0, float roughness, float NoV)
     return f0 * scale + bias;
 }
 
+vec3 SpecularDFG(const PixelParams params)
+{
+    return params.f0 * params.dfg.x + params.dfg.y;
+}
+
 void GetPixelParams(inout PixelParams params, float NoV)
 {
     vec3 albedo = GetAlbedo();
@@ -302,14 +316,29 @@ void GetPixelParams(inout PixelParams params, float NoV)
 
     params.metallic = metallicRoughness.x; // Useful ?
     params.reflectance = 0.04;
-    params.perceptualRoughness = clamp(metallicRoughness.y, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
+    params.perceptualRoughness = clamp(metallicRoughness.y, MIN_PERCEPTUAL_ROUGHNESS, 1);
     params.roughness = params.perceptualRoughness * params.perceptualRoughness;
     params.diffuseColor = albedo * (1.0 - metallicRoughness.x);
     params.f0 = albedo * params.metallic + (params.reflectance * (1.0 - params.metallic));
 
-    params.dfg = textureLod(s_iblDFG, vec2(NoV, params.perceptualRoughness), 0.0).rgb;
-    // params.dfg = EnvDFGPolynomial(params.f0, params.perceptualRoughness, NoV);
+    params.dfg = textureLod(s_iblDFG, vec2(NoV, params.roughness), 0.0).rgb;
     params.energyCompensation = 1.0 + params.f0 * (1.0 / params.dfg.y - 1.0);
+}
+
+vec3 EvaluateIBL(in vec3 n, in vec3 v, in PixelParams params)
+{
+    // specular layer
+    vec3 E = SpecularDFG(params);
+    vec3 r = reflect(-v, n);
+    vec3 specularIndirect = textureLod(s_radianceMap, r, params.perceptualRoughness * 8.0).rgb;
+    // vec3 specularIndirect = textureLod(s_radianceMap, r, 0).rgb;
+    vec3 Fr = specularIndirect * E;
+
+    // diffuse layer
+    vec3 diffuseIrradiance = texture(s_irradianceMap, n).rgb;
+    vec3 Fd = params.diffuseColor * diffuseIrradiance * (1.0 - E);
+
+    return Fr + Fd;
 }
 
 vec3 BRDF(in vec3 n, in vec3 v, in vec3 l, in PixelParams params)
@@ -322,8 +351,7 @@ vec3 BRDF(in vec3 n, in vec3 v, in vec3 l, in PixelParams params)
     float LoH = saturate(dot(l, h));
     float VoH = saturate(dot(h, v));
 
-    // vec3 F = F_Schlick(params.f0, VoH);
-    vec3 F = F_Schlick(params.f0, dot(v, h));
+    vec3 F = F_Schlick(params.f0, NoH);
     float D = D_GGX(params.roughness, NoH);
     float Vis = Vis_SmithJointApprox(params.roughness, NoV, NoL);
 
@@ -333,26 +361,11 @@ vec3 BRDF(in vec3 n, in vec3 v, in vec3 l, in PixelParams params)
     return Fr + Fd;
 }
 
-vec3 EvaluateIBL(in vec3 n, in vec3 v, in PixelParams params)
-{
-    // specular layer
-    vec3 Fr;
-    vec3 E = mix(params.dfg.xxx, params.dfg.yyy, params.f0);
-    vec3 r = reflect(-v, n);
-    Fr = vec3(0);
-
-    // diffuse layer
-    vec3 diffuseIrradiance = texture(s_irradianceMap, n).rgb;
-    vec3 Fd = params.diffuseColor * diffuseIrradiance * (1.0 - E);
-
-    return Fd;
-}
-
 vec3 EvaluateDirectLighting(in vec3 n, in vec3 v, in PixelParams params)
 {
     vec3 Lo = vec3(0.0);
 
-    for (int i = 0; i < 0; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         vec3 lightVec = GetLightPos(i) - GetFragPos();
 
@@ -374,20 +387,20 @@ void main()
     vec3 n = GetNormal();
     vec3 v = normalize(GetViewPos() - GetFragPos());
 
+    if (GetAlpha() < 0.5) discard;
+
     PixelParams params;
     GetPixelParams(params, max(dot(n, v), 1e-4));
 
     vec3 color = EvaluateIBL(n, v, params);
-
     color += EvaluateDirectLighting(n, v, params);
+    color += GetEmissive();
+    color *= GetAmbientOcclusion();
 
     // tonemapping
-    color = color / (color + 1.0);
+    // color = color / (color + 1.0);
     // gamma
     color = pow(color, vec3(1.0 / 2.2));
 
     out_color = vec4(color, 1.0);
-
-    out_color.rgb = vec3(params.dfg.b);
-    // out_color.rgb = vec3(max(dot(n, v), 1e-4));
 }

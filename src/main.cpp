@@ -1,3 +1,6 @@
+#include "defines.h"
+#include "utils.h"
+
 #include <glad/glad.h>
 #include <glfw/glfw3.h>
 
@@ -27,43 +30,31 @@
 
 #include <stdio.h>
 
-constexpr float Pi        = 3.14159265359f;
-constexpr float Tau       = 2.0f * Pi;
-constexpr float ToRadians = Pi / 180.0f;
-constexpr float ToDegrees = 180.0f / Pi;
+extern std::vector<glm::vec3> PrecomputeDFG(u32 w, u32 h, u32 sampleCount); // 128, 128, 512
 
-static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
-static void MouseMoveCallback(GLFWwindow* window, double x, double y);
-static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
-static void WheelCallback(GLFWwindow* window, double x, double y);
+static void MouseButtonCallback(GLFWwindow* window, i32 button, i32 action, i32 mods);
+static void MouseMoveCallback(GLFWwindow* window, f64 x, f64 y);
+static void KeyCallback(GLFWwindow* window, i32 key, i32 scancode, i32 action, i32 mods);
+static void WheelCallback(GLFWwindow* window, f64 x, f64 y);
 
-static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
+static void FramebufferSizeCallback(GLFWwindow* window, i32 width, i32 height);
 
-static void DropCallback(GLFWwindow* window, int count, const char** paths);
+static void DropCallback(GLFWwindow* window, i32 count, const char** paths);
 
 void RenderCube();
 
-void DebugOutput(GLenum source, GLenum type, uint32_t id, GLenum severity, GLsizei length, const char* message, const void* userParam);
+void DebugOutput(GLenum source, GLenum type, u32 id, GLenum severity, GLsizei length, const char* message, const void* userParam);
 
-static int g_width, g_height;
+static i32 g_width, g_height;
 
-template <typename T>
-inline constexpr T Min(T a, T b)
+enum RenderMode
 {
-	return a < b ? a : b;
-}
+	RenderMode_Default = 0,
+	RenderMode_IBL_DFG,
+	RenderMode_Count,
+};
 
-template <typename T>
-inline constexpr T Max(T a, T b)
-{
-	return a > b ? a : b;
-}
-
-template <typename T>
-inline constexpr T Clamp(T x, T a, T b)
-{
-	return Min(b, Max(x, a));
-}
+u32 g_renderMode = RenderMode_Default;
 
 std::string GetFileExtension(const std::string& filename)
 {
@@ -79,9 +70,9 @@ struct Vertex
 
 struct Camera
 {
-	float phi      = 0.0f;
-	float theta    = 90.0f;
-	float distance = 1.0f;
+	f32 phi      = 0.0f;
+	f32 theta    = 90.0f;
+	f32 distance = 1.0f;
 
 	glm::vec3 position;
 	glm::vec3 center;
@@ -89,9 +80,9 @@ struct Camera
 
 	glm::mat4 GetView()
 	{
-		const float x = distance * sinf(theta * ToRadians) * sinf(phi * ToRadians);
-		const float y = distance * cosf(theta * ToRadians);
-		const float z = distance * sinf(theta * ToRadians) * cosf(phi * ToRadians);
+		const f32 x = distance * sinf(theta * ToRadians) * sinf(phi * ToRadians);
+		const f32 y = distance * cosf(theta * ToRadians);
+		const f32 z = distance * sinf(theta * ToRadians) * cosf(phi * ToRadians);
 
 		position = glm::vec3(x, y, z);
 		center   = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -101,7 +92,7 @@ struct Camera
 	}
 };
 
-uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vector<const char*>& defines)
+u32 CompileShader(const char* filename, GLenum shaderType, const std::vector<const char*>& defines)
 {
 	FILE* file = fopen(filename, "r");
 	if (!file)
@@ -135,13 +126,13 @@ uint32_t CompileShader(const char* filename, GLenum shaderType, const std::vecto
 		strcpy(finalSrc[i], completeShader[i].data());
 	}
 
-	uint32_t shader = glCreateShader(shaderType);
+	u32 shader = glCreateShader(shaderType);
 
 	glShaderSource(shader, completeShader.size(), finalSrc, nullptr);
 	GLenum error = glGetError();
 	glCompileShader(shader);
 
-	int compiled = GL_FALSE;
+	i32 compiled = GL_FALSE;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
 
 	for (size_t i = 0; i < completeShader.size(); ++i)
@@ -236,11 +227,11 @@ public:
 	{
 		glUniform1i(GetLocation(name), value);
 	}
-	void SetUniform(const char* name, uint32_t value) const
+	void SetUniform(const char* name, u32 value) const
 	{
 		glUniform1ui(GetLocation(name), value);
 	}
-	void SetUniform(const char* name, float value) const
+	void SetUniform(const char* name, f32 value) const
 	{
 		glUniform1f(GetLocation(name), value);
 	}
@@ -311,7 +302,7 @@ private:
 
 		glLinkProgram(program);
 
-		int linked = GL_FALSE;
+		i32 linked = GL_FALSE;
 		glGetProgramiv(program, GL_LINK_STATUS, &linked);
 
 		if (!linked)
@@ -389,7 +380,7 @@ private:
 	std::vector<const char*> m_defines;
 };
 
-static std::unordered_map<uint32_t, Program>   g_programs;
+static std::unordered_map<u32, Program>        g_programs;
 static std::unordered_map<std::string, GLuint> g_textures;
 
 GLuint LoadTexture(const std::string& filename)
@@ -402,7 +393,7 @@ GLuint LoadTexture(const std::string& filename)
 
 	stbi_set_flip_vertically_on_load(true);
 
-	int      w, h, c;
+	i32      w, h, c;
 	uint8_t* data = stbi_load(filename.c_str(), &w, &h, &c, 0);
 
 	stbi_set_flip_vertically_on_load(false);
@@ -415,7 +406,7 @@ GLuint LoadTexture(const std::string& filename)
 	GLuint texture;
 	glCreateTextures(GL_TEXTURE_2D, 1, &texture);
 
-	const int levels = log2f(Min(w, h));
+	const i32 levels = log2f(Min(w, h));
 
 	GLenum format, internalFormat;
 	switch (c)
@@ -449,220 +440,9 @@ GLuint LoadTexture(const std::string& filename)
 	return texture;
 }
 
-/*
-File Structure:
-  Section     Length
-  ///////////////////
-  FILECODE    4
-  HEADER      124
-  HEADER_DX10* 20	(https://msdn.microsoft.com/en-us/library/bb943983(v=vs.85).aspx)
-  PIXELS      fseek(f, 0, SEEK_END); (ftell(f) - 128) - (fourCC == "DX10" ? 17 or 20 : 0)
-* the link tells you that this section isn't written unless its a DX10 file
-Supports DXT1, DXT3, DXT5.
-The problem with supporting DX10 is you need to know what it is used for and how opengl would use it.
-File Byte Order:
-typedef uint32_t DWORD;           // 32bits little endian
-  type   index    attribute           // description
-///////////////////////////////////////////////////////////////////////////////////////////////
-  DWORD  0        file_code;          //. always `DDS `, or 0x20534444
-  DWORD  4        size;               //. size of the header, always 124 (includes PIXELFORMAT)
-  DWORD  8        flags;              //. bitflags that tells you if data is present in the file
-                                      //      CAPS         0x1
-                                      //      HEIGHT       0x2
-                                      //      WIDTH        0x4
-                                      //      PITCH        0x8
-                                      //      PIXELFORMAT  0x1000
-                                      //      MIPMAPCOUNT  0x20000
-                                      //      LINEARSIZE   0x80000
-                                      //      DEPTH        0x800000
-  DWORD  12       height;             //. height of the base image (biggest mipmap)
-  DWORD  16       width;              //. width of the base image (biggest mipmap)
-  DWORD  20       pitchOrLinearSize;  //. bytes per scan line in an uncompressed texture, or bytes in the top level texture for a compressed
-texture
-                                      //     D3DX11.lib and other similar libraries unreliably or inconsistently provide the pitch, convert
-with
-                                      //     DX* && BC*: max( 1, ((width+3)/4) ) * block-size
-                                      //     *8*8_*8*8 && UYVY && YUY2: ((width+1) >> 1) * 4
-                                      //     (width * bits-per-pixel + 7)/8 (divide by 8 for byte alignment, whatever that means)
-  DWORD  24       depth;              //. Depth of a volume texture (in pixels), garbage if no volume data
-  DWORD  28       mipMapCount;        //. number of mipmaps, garbage if no pixel data
-  DWORD  32       reserved1[11];      //. unused
-  DWORD  76       Size;               //. size of the following 32 bytes (PIXELFORMAT)
-  DWORD  80       Flags;              //. bitflags that tells you if data is present in the file for following 28 bytes
-                                      //      ALPHAPIXELS  0x1
-                                      //      ALPHA        0x2
-                                      //      FOURCC       0x4
-                                      //      RGB          0x40
-                                      //      YUV          0x200
-                                      //      LUMINANCE    0x20000
-  DWORD  84       FourCC;             //. File format: DXT1, DXT2, DXT3, DXT4, DXT5, DX10.
-  DWORD  88       RGBBitCount;        //. Bits per pixel
-  DWORD  92       RBitMask;           //. Bit mask for R channel
-  DWORD  96       GBitMask;           //. Bit mask for G channel
-  DWORD  100      BBitMask;           //. Bit mask for B channel
-  DWORD  104      ABitMask;           //. Bit mask for A channel
-  DWORD  108      caps;               //. 0x1000 for a texture w/o mipmaps
-                                      //      0x401008 for a texture w/ mipmaps
-                                      //      0x1008 for a cube map
-  DWORD  112      caps2;              //. bitflags that tells you if data is present in the file
-                                      //      CUBEMAP           0x200     Required for a cube map.
-                                      //      CUBEMAP_POSITIVEX 0x400     Required when these surfaces are stored in a cube map.
-                                      //      CUBEMAP_NEGATIVEX 0x800     ^
-                                      //      CUBEMAP_POSITIVEY 0x1000    ^
-                                      //      CUBEMAP_NEGATIVEY 0x2000    ^
-                                      //      CUBEMAP_POSITIVEZ 0x4000    ^
-                                      //      CUBEMAP_NEGATIVEZ 0x8000    ^
-                                      //      VOLUME            0x200000  Required for a volume texture.
-  DWORD  114      caps3;              //. unused
-  DWORD  116      caps4;              //. unused
-  DWORD  120      reserved2;          //. unused
-*/
-GLuint LoadDDS(const char* path)
-{
-	// lay out variables to be used
-	uint8_t* header;
-
-	uint32_t width;
-	uint32_t height;
-	uint32_t mipMapCount;
-
-	uint32_t blockSize;
-	uint32_t format;
-
-	uint32_t w;
-	uint32_t h;
-
-	uint8_t* buffer = 0;
-
-	GLuint tid = 0;
-
-	// open the DDS file for binary reading and get file size
-	FILE* f;
-	if ((f = fopen(path, "rb")) == 0)
-	{
-		fprintf(stderr, "Could not open file %s\n", path);
-		return 0;
-	}
-
-	fseek(f, 0, SEEK_END);
-	long file_size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-
-	// allocate new uint8_t space with 4 (file code) + 124 (header size) bytes
-	// read in 128 bytes from the file
-	header = (uint8_t*)malloc(128);
-	fread(header, 1, 128, f);
-
-	// compare the `DDS ` signature
-	if (memcmp(header, "DDS ", 4) != 0)
-	{
-		free(header);
-		fclose(f);
-		fprintf(stderr, "%s is not a dds file\n", path);
-		return 0;
-	}
-
-	// extract height, width, and amount of mipmaps - yes it is stored height then width
-	height      = (header[12]) | (header[13] << 8) | (header[14] << 16) | (header[15] << 24);
-	width       = (header[16]) | (header[17] << 8) | (header[18] << 16) | (header[19] << 24);
-	mipMapCount = (header[28]) | (header[29] << 8) | (header[30] << 16) | (header[31] << 24);
-
-	// figure out what format to use for what fourCC file type it is
-	// block size is about physical chunk storage of compressed data in file (important)
-	if (header[84] == 'D')
-	{
-		switch (header[87])
-		{
-			case '1': // DXT1
-				format    = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
-				blockSize = 8;
-				break;
-			case '3': // DXT3
-				format    = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
-				blockSize = 16;
-				break;
-			case '5': // DXT5
-				format    = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-				blockSize = 16;
-				break;
-			case '0': // DX10
-			          // unsupported, else will error
-			          // as it adds sizeof(struct DDS_HEADER_DXT10) between pixels
-			          // so, buffer = malloc((file_size - 128) - sizeof(struct DDS_HEADER_DXT10));
-			default:
-				free(header);
-				fclose(f);
-				fprintf(stderr, "%s is not an handled DDS format\n", path);
-				return 0;
-		}
-	}
-	else // BC4U/BC4S/ATI2/BC55/R8G8_B8G8/G8R8_G8B8/UYVY-packed/YUY2-packed unsupported
-	{
-		free(header);
-		fclose(f);
-		fprintf(stderr, "%s is not a supported DDS file\n", path);
-		return 0;
-	}
-
-	// allocate new uint8_t space with file_size - (file_code + header_size) magnitude
-	// read rest of file
-	buffer = (uint8_t*)malloc(file_size - 128);
-	if (buffer == 0)
-	{
-		free(header);
-		fclose(f);
-		fprintf(stderr, "Cannot malloc\n");
-		return 0;
-	}
-	fread(buffer, 1, file_size, f);
-
-	// prepare new incomplete texture
-	glGenTextures(1, &tid);
-
-	// bind the texture
-	// make it complete by specifying all needed parameters and ensuring all mipmaps are filled
-	glBindTexture(GL_TEXTURE_2D, tid);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1); // opengl likes array length of mipmaps
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); // don't forget to enable mipmaping
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-	// prepare some variables
-	uint32_t offset = 0;
-	uint32_t size   = 0;
-	w               = width;
-	h               = height;
-
-	// loop through sending block at a time with the magic formula
-	// upload to opengl properly, note the offset transverses the pointer
-	// assumes each mipmap is 1/2 the size of the previous mipmap
-	for (uint32_t i = 0; i < mipMapCount; i++)
-	{
-		if (w == 0 || h == 0)
-		{ // discard any odd mipmaps 0x1 0x2 resolutions
-			mipMapCount--;
-			continue;
-		}
-		size = ((w + 3) / 4) * ((h + 3) / 4) * blockSize;
-		glCompressedTexImage2D(GL_TEXTURE_2D, i, format, w, h, 0, size, buffer + offset);
-		offset += size;
-		w /= 2;
-		h /= 2;
-	}
-	// discard any odd mipmaps, ensure a complete texture
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipMapCount - 1);
-	// unbind
-	glBindTexture(GL_TEXTURE_2D, 0);
-
-	free(buffer);
-	free(header);
-	fclose(f);
-	return tid;
-}
-
 static GLuint g_irradianceMap;
+static GLuint g_radianceMap;
+static GLuint g_envCubeMap;
 static GLuint g_iblDFG;
 
 struct Material
@@ -674,10 +454,10 @@ struct Material
 	{
 	}
 
-	uint32_t GetMask() const
+	u32 GetMask() const
 	{
 		// clang-format off
-		const uint32_t result = 0
+		const u32 result = 0
 			| hasAlbedo                   << 0
 			| hasAlbedoTexture            << 1
 			| hasRoughness                << 2
@@ -760,6 +540,11 @@ struct Material
 		glBindTextureUnit(index, g_irradianceMap);
 		++index;
 
+		program->SetUniform("s_radianceMap", index);
+		glBindTextureUnit(index, g_radianceMap);
+		// glBindTextureUnit(index, g_envCubeMap);
+		++index;
+
 		program->SetUniform("s_iblDFG", index);
 		glBindTextureUnit(index, g_iblDFG);
 		++index;
@@ -818,8 +603,8 @@ private:
 
 public:
 	glm::vec3 albedo;
-	float     roughness;
-	float     metallic;
+	f32       roughness;
+	f32       metallic;
 	glm::vec3 emissive;
 
 	GLuint albedoTexture            = 0;
@@ -860,7 +645,7 @@ struct RenderContext
 
 void SetupShader(RenderContext* context, Material* material)
 {
-	const uint32_t mask = material->GetMask();
+	const u32 mask = material->GetMask();
 
 	if (g_programs.find(mask) == g_programs.end())
 	{
@@ -1037,7 +822,7 @@ struct Mesh
 
 		if (vertexDataInfos.singleBuffer)
 		{
-			int        vboIndex   = 0;
+			i32        vboIndex   = 0;
 			GLsizeiptr vboBasePtr = alignedIndexSize;
 
 			const GLubyte* data = vertexDataInfos.layout[0].data;
@@ -1068,7 +853,7 @@ struct Mesh
 		}
 		else
 		{
-			int        vboIndex   = 0;
+			i32        vboIndex   = 0;
 			GLsizeiptr vboBasePtr = alignedIndexSize;
 
 			std::unordered_map<const GLubyte*, GLsizeiptr> insertedData;
@@ -1176,7 +961,7 @@ static Camera g_camera;
 void SetupUI(GLFWwindow* window);
 void RenderUI(std::vector<Model>* models);
 
-float g_lastScroll = 0.0f;
+f32 g_lastScroll = 0.0f;
 
 GLuint Render(std::vector<Model>* models, const glm::vec2& size);
 
@@ -1190,15 +975,15 @@ GLuint msaaRenderTexture;
 GLuint msaaDepthRenderBuffer;
 GLuint resolveTexture;
 
-double g_viewportX = 0.0, g_viewportY = 0.0;
-double g_viewportW = 0.0, g_viewportH = 0.0;
+f64 g_viewportX = 0.0, g_viewportY = 0.0;
+f64 g_viewportW = 0.0, g_viewportH = 0.0;
 
 static std::vector<Model> g_models;
 
 Mesh* ProcessMesh(aiMesh* inputMesh, const aiScene* scene)
 {
-	std::vector<Vertex>   vertices;
-	std::vector<uint32_t> indices;
+	std::vector<Vertex> vertices;
+	std::vector<u32>    indices;
 
 	vertices.reserve(inputMesh->mNumVertices);
 	indices.reserve(inputMesh->mNumFaces * 3);
@@ -1207,7 +992,7 @@ Mesh* ProcessMesh(aiMesh* inputMesh, const aiScene* scene)
 	const aiVector3D* inNormals   = inputMesh->mNormals;
 	const aiVector3D* inTexcoords = inputMesh->mTextureCoords[0];
 
-	for (uint32_t index = 0; index < inputMesh->mNumVertices; ++index)
+	for (u32 index = 0; index < inputMesh->mNumVertices; ++index)
 	{
 		const aiVector3D v = *inVertices++;
 		const aiVector3D n = *inNormals++;
@@ -1226,10 +1011,10 @@ Mesh* ProcessMesh(aiMesh* inputMesh, const aiScene* scene)
 	}
 
 	const aiFace* inFaces = inputMesh->mFaces;
-	for (uint32_t i = 0; i < inputMesh->mNumFaces; ++i)
+	for (u32 i = 0; i < inputMesh->mNumFaces; ++i)
 	{
 		const aiFace face = *inFaces++;
-		for (uint32_t j = 0; j < face.mNumIndices; ++j)
+		for (u32 j = 0; j < face.mNumIndices; ++j)
 		{
 			indices.push_back(face.mIndices[j]);
 		}
@@ -1264,14 +1049,14 @@ Material* ProcessMaterial(aiMaterial* inputMaterial, const aiScene* scene, const
 		material->albedo    = glm::vec3(albedo.r, albedo.g, albedo.b);
 	}
 
-	float metallic;
+	f32 metallic;
 	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLIC_FACTOR, metallic))
 	{
 		material->hasMetallic = true;
 		material->metallic    = metallic;
 	}
 
-	float roughness;
+	f32 roughness;
 	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_ROUGHNESS_FACTOR, roughness))
 	{
 		material->hasRoughness = true;
@@ -1329,7 +1114,7 @@ void ProcessNode(aiNode* node, const aiScene* scene, const glm::mat4& parentTran
 
 	const glm::mat4 transform = parentTransform * nodeTransform;
 
-	for (uint32_t index = 0; index < node->mNumMeshes; ++index)
+	for (u32 index = 0; index < node->mNumMeshes; ++index)
 	{
 		Model model;
 
@@ -1342,7 +1127,7 @@ void ProcessNode(aiNode* node, const aiScene* scene, const glm::mat4& parentTran
 		g_models.push_back(model);
 	}
 
-	for (uint32_t index = 0; index < node->mNumChildren; ++index)
+	for (u32 index = 0; index < node->mNumChildren; ++index)
 	{
 		ProcessNode(node->mChildren[index], scene, transform, path);
 	}
@@ -1352,9 +1137,8 @@ void LoadScene(const char* filename)
 {
 	Assimp::Importer importer;
 
-	const uint32_t importerFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace |
-	                               aiProcess_OptimizeMeshes;
-	const aiScene* scene = importer.ReadFile(filename, importerFlags);
+	const u32 importerFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace | aiProcess_OptimizeMeshes;
+	const aiScene* scene    = importer.ReadFile(filename, importerFlags);
 
 	if ((nullptr == scene) || (0 != scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || (nullptr == scene->mRootNode))
 	{
@@ -1369,17 +1153,17 @@ void LoadScene(const char* filename)
 }
 
 static Program g_equirectangularToCubemapProgram;
+static Program g_prefilterEnvmapProgram;
 static Program g_irradianceProgram;
 static Program g_backgroundProgram;
 static Mesh    g_cubeMesh;
-static GLuint  g_envCubeMap;
 
 void LoadEnvironment(const char* filename)
 {
 	stbi_set_flip_vertically_on_load(true);
 
-	int    w, h, c;
-	float* data = stbi_loadf(filename, &w, &h, &c, 0);
+	i32  w, h, c;
+	f32* data = stbi_loadf(filename, &w, &h, &c, 0);
 
 	stbi_set_flip_vertically_on_load(false);
 
@@ -1388,10 +1172,12 @@ void LoadEnvironment(const char* filename)
 		return;
 	}
 
+	const u32 cubemapSize = 512;
+
 	GLuint equirectangularTexture;
 	glCreateTextures(GL_TEXTURE_2D, 1, &equirectangularTexture);
 
-	const int levels = log2f(Min(w, h));
+	const i32 levels = log2f(Min(w, h));
 
 	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
 	glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
@@ -1411,12 +1197,12 @@ void LoadEnvironment(const char* filename)
 	glGenTextures(1, &g_envCubeMap);
 	glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
 
-	// glTextureStorage2D(g_envCubeMap, 1, GL_RGB32F, 512, 512);
+	// glTextureStorage2D(g_envCubeMap, 1, GL_RGB32F, cubemapSize, cubemapSize);
 	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
-	for (int face = 0; face < 6; ++face)
+	for (i32 face = 0; face < 6; ++face)
 	{
 		// face:
 		// 0 -> positive x
@@ -1425,14 +1211,14 @@ void LoadEnvironment(const char* filename)
 		// 3 -> negative y
 		// 4 -> positive z
 		// 5 -> negative z
-		// glTextureSubImage3D(g_envCubeMap, 0, 0, 0, face, 512, 512, 1, GL_RGB, GL_HALF_FLOAT, nullptr);
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
+		// glTextureSubImage3D(g_envCubeMap, 0, 0, 0, face, cubemapSize, cubemapSize, 1, GL_RGB, GL_HALF_FLOAT, nullptr);
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, cubemapSize, cubemapSize, 0, GL_RGB, GL_FLOAT, nullptr);
 	}
 
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
 	// clang-format off
@@ -1453,20 +1239,25 @@ void LoadEnvironment(const char* filename)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
 	glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, cubemapSize, cubemapSize);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
 
 	g_equirectangularToCubemapProgram.Bind();
 	g_equirectangularToCubemapProgram.SetUniform("equirectangularMap", 0);
 	glBindTextureUnit(0, equirectangularTexture);
 	g_equirectangularToCubemapProgram.SetUniform("proj", captureProjection);
-	glViewport(0, 0, 512, 512);
+	glViewport(0, 0, cubemapSize, cubemapSize);
 
 	glDepthFunc(GL_ALWAYS);
-	for (int face = 0; face < 6; ++face)
+	for (i32 face = 0; face < 6; ++face)
 	{
 		g_equirectangularToCubemapProgram.SetUniform("view", captureViews[face]);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_envCubeMap, 0);
+
+		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			fprintf(stderr, "framebuffer incomplete\n");
+		}
 
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClearDepth(1.0f);
@@ -1474,14 +1265,81 @@ void LoadEnvironment(const char* filename)
 		// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
 		// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
 
-		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		{
-			fprintf(stderr, "framebuffer incomplete\n");
-		}
-
 		RenderCube();
 	}
-	glDepthFunc(GL_LESS);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	glFlush();
+	glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+	// Generate mipmaps
+	if (glIsTexture(g_radianceMap))
+	{
+		glDeleteTextures(1, &g_radianceMap);
+	}
+
+	glGenTextures(1, &g_radianceMap);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_radianceMap);
+
+	for (i32 face = 0; face < 6; ++face)
+	{
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, cubemapSize, cubemapSize, 0, GL_RGB, GL_FLOAT, nullptr);
+	}
+
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glGenerateMipmap(GL_TEXTURE_CUBE_MAP); // Allocate memory
+
+	g_prefilterEnvmapProgram.Bind();
+	g_prefilterEnvmapProgram.SetUniform("envmap", 0);
+	glBindTextureUnit(0, g_envCubeMap);
+	g_prefilterEnvmapProgram.SetUniform("proj", captureProjection);
+
+	u32 mipLevels = (u32)log2f((float)cubemapSize);
+	u32 mipSize   = cubemapSize;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+	for (u32 mip = 0; mip < mipLevels; ++mip)
+	{
+		glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipSize, mipSize);
+
+		glViewport(0, 0, mipSize, mipSize);
+
+		const f32 roughness = (f32)mip / (f32)(mipLevels - 1);
+		g_prefilterEnvmapProgram.SetUniform("roughness", roughness);
+
+		for (i32 face = 0; face < 6; ++face)
+		{
+			g_prefilterEnvmapProgram.SetUniform("view", captureViews[face]);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_radianceMap, mip);
+
+			if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			{
+				fprintf(stderr, "framebuffer incomplete\n");
+			}
+
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClearDepth(1.0f);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+			// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
+			// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
+
+			RenderCube();
+		}
+
+		mipSize /= 2;
+
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	}
+
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	if (glIsTexture(g_irradianceMap))
 	{
@@ -1491,15 +1349,8 @@ void LoadEnvironment(const char* filename)
 	glGenTextures(1, &g_irradianceMap);
 	glBindTexture(GL_TEXTURE_CUBE_MAP, g_irradianceMap);
 
-	for (int face = 0; face < 6; ++face)
+	for (i32 face = 0; face < 6; ++face)
 	{
-		// face:
-		// 0 -> positive x
-		// 1 -> negative x
-		// 2 -> positive y
-		// 3 -> negative y
-		// 4 -> positive z
-		// 5 -> negative z
 		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, 64, 64, 0, GL_RGB, GL_FLOAT, nullptr);
 	}
 
@@ -1509,6 +1360,8 @@ void LoadEnvironment(const char* filename)
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
+	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+	glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 64, 64);
 
 	g_irradianceProgram.Bind();
@@ -1518,7 +1371,7 @@ void LoadEnvironment(const char* filename)
 	glViewport(0, 0, 64, 64);
 
 	glDepthFunc(GL_ALWAYS);
-	for (int face = 0; face < 6; ++face)
+	for (i32 face = 0; face < 6; ++face)
 	{
 		g_irradianceProgram.SetUniform("view", captureViews[face]);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_irradianceMap, 0);
@@ -1548,7 +1401,7 @@ void LoadEnvironment(const char* filename)
 glm::vec3 g_lightDirection    = glm::vec3(0, -1, 0);
 bool      g_showIrradianceMap = false;
 
-int main()
+i32 main()
 {
 	glfwInit();
 
@@ -1590,15 +1443,29 @@ int main()
 
 	SetupUI(window);
 
-	// glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
 	g_equirectangularToCubemapProgram = Program::MakeRender("equirectangularToCubemap",
 	                                                        "resources/shaders/cubemap.vert",
 	                                                        "resources/shaders/equirectangularToCubemap.frag");
+
+	g_prefilterEnvmapProgram = Program::MakeRender("prefilterEnvmap", "resources/shaders/cubemap.vert", "resources/shaders/prefilter.frag");
+
 	g_irradianceProgram = Program::MakeRender("irradiance", "resources/shaders/cubemap.vert", "resources/shaders/irradiance.frag");
 	g_backgroundProgram = Program::MakeRender("background", "resources/shaders/background.vert", "resources/shaders/background.frag");
 
-	g_iblDFG = LoadDDS("resources/textures/dfg.dds");
+	glCreateTextures(GL_TEXTURE_2D, 1, &g_iblDFG);
+
+	const i32 levels = 1;
+
+	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
+	glTextureStorage2D(g_iblDFG, 1, GL_RGB32F, 128, 128);
+	// glTextureSubImage2D(g_iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1).data());
+	glTextureSubImage2D(g_iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1024).data());
+	glTextureParameteri(g_iblDFG, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(g_iblDFG, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(g_iblDFG, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTextureParameteri(g_iblDFG, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
 	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr");
 
@@ -1680,7 +1547,7 @@ int main()
 			vMax.x += ImGui::GetWindowPos().x;
 			vMax.y += ImGui::GetWindowPos().y;
 
-			int wx, wy;
+			i32 wx, wy;
 			glfwGetWindowPos(window, &wx, &wy);
 
 			vMin.x -= wx;
@@ -1695,17 +1562,27 @@ int main()
 
 			const glm::vec2 size(g_viewportW, g_viewportH);
 
-			ImTextureID id = (void*)(intptr_t)Render(&g_models, size);
+			ImTextureID id;
+			switch (g_renderMode)
+			{
+				case RenderMode_IBL_DFG:
+					id = (void*)(intptr_t)g_iblDFG;
+					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 0), ImVec2(1, 1));
+					break;
+				case RenderMode_Default:
+				default:
+					id = (void*)(intptr_t)Render(&g_models, size);
+					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
+			}
 			// ImTextureID
-			ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
 		}
 		ImGui::End();
 
-		static int selectedEntity = -1;
+		static i32 selectedEntity = -1;
 
 		ImGui::Begin("Entities");
 		{
-			for (int i = 0; i < g_models.size(); ++i)
+			for (i32 i = 0; i < g_models.size(); ++i)
 			{
 				char buf[32];
 				sprintf(buf, "Entity #%d", i);
@@ -1803,19 +1680,19 @@ int main()
 	return 0;
 }
 
-double lastX, lastY;
-bool   movingCamera = false;
+f64  lastX, lastY;
+bool movingCamera = false;
 
-inline bool inViewport(double x, double y)
+inline bool inViewport(f64 x, f64 y)
 {
 	return (x >= g_viewportX && x <= (g_viewportX + g_viewportW)) && (y >= g_viewportY && y <= (g_viewportY + g_viewportH));
 }
 
-static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
+static void MouseButtonCallback(GLFWwindow* window, i32 button, i32 action, i32 mods)
 {
 	if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
 	{
-		double x, y;
+		f64 x, y;
 		glfwGetCursorPos(window, &x, &y);
 
 		if (inViewport(x, y))
@@ -1831,51 +1708,56 @@ static void MouseButtonCallback(GLFWwindow* window, int button, int action, int 
 	}
 }
 
-static void MouseMoveCallback(GLFWwindow* window, double x, double y)
+static void MouseMoveCallback(GLFWwindow* window, f64 x, f64 y)
 {
 	if (movingCamera)
 	{
-		const double dx = 0.1f * (x - lastX);
-		const double dy = 0.1f * (y - lastY);
+		const f64 dx = 0.1f * (x - lastX);
+		const f64 dy = 0.1f * (y - lastY);
 
 		g_camera.phi += dx;
-		g_camera.theta = Clamp(g_camera.theta + (float)dy, 10.0f, 170.0f);
+		g_camera.theta = Clamp(g_camera.theta + (f32)dy, 10.0f, 170.0f);
 
 		lastX = x;
 		lastY = y;
 	}
 }
 
-static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
+static void KeyCallback(GLFWwindow* window, i32 key, i32 scancode, i32 action, i32 mods)
 {
 	if (key == GLFW_KEY_ESCAPE && action == GLFW_RELEASE)
 	{
 		glfwSetWindowShouldClose(window, GLFW_TRUE);
 	}
+
+	if ((key == GLFW_KEY_N) && ((mods & GLFW_MOD_CONTROL) == GLFW_MOD_CONTROL) && (action == GLFW_RELEASE))
+	{
+		g_renderMode = (g_renderMode + 1) % RenderMode_Count;
+	}
 }
 
-static void WheelCallback(GLFWwindow* window, double x, double y)
+static void WheelCallback(GLFWwindow* window, f64 x, f64 y)
 {
 	if (!movingCamera)
 	{
-		double mouseX, mouseY;
+		f64 mouseX, mouseY;
 		glfwGetCursorPos(window, &mouseX, &mouseY);
 
 		if (inViewport(mouseX, mouseY))
 		{
-			constexpr float minDistance = 0.01f;
-			constexpr float maxDistance = 100.0f;
+			constexpr f32 minDistance = 0.01f;
+			constexpr f32 maxDistance = 100.0f;
 
-			const float multiplier = 2.5f * (g_camera.distance - minDistance) / (maxDistance - minDistance);
+			const f32 multiplier = 2.5f * (g_camera.distance - minDistance) / (maxDistance - minDistance);
 
-			const float distance = g_camera.distance - (float)y * multiplier;
+			const f32 distance = g_camera.distance - (f32)y * multiplier;
 
 			g_camera.distance = Clamp(distance, minDistance, maxDistance);
 		}
 	}
 }
 
-static void FramebufferSizeCallback(GLFWwindow* window, int width, int height)
+static void FramebufferSizeCallback(GLFWwindow* window, i32 width, i32 height)
 {
 	g_width  = width;
 	g_height = height;
@@ -1958,6 +1840,7 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 
 	g_backgroundProgram.Update();
 	g_equirectangularToCubemapProgram.Update();
+	g_prefilterEnvmapProgram.Update();
 	g_irradianceProgram.Update();
 
 	glViewport(0, 0, size.x, size.y);
@@ -1972,7 +1855,7 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 	RenderContext context = {
 	    .eyePosition = g_camera.position,
 	    .view        = g_camera.GetView(),
-	    .proj        = glm::perspective(60.0f * ToRadians, (float)size.x / size.y, 0.001f, 100.0f),
+	    .proj        = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.001f, 100.0f),
 	};
 
 	for (auto&& model : *models)
@@ -1985,7 +1868,8 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 	g_backgroundProgram.SetUniform("view", context.view);
 	g_backgroundProgram.SetUniform("proj", context.proj);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_irradianceMap : g_envCubeMap);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_radianceMap : g_envCubeMap);
+	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_irradianceMap : g_envCubeMap);
 	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
 	RenderCube();
 
@@ -2009,9 +1893,9 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 	return resolveTexture;
 }
 
-static void DropCallback(GLFWwindow* window, int count, const char** paths)
+static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 {
-	for (int i = 0; i < count; ++i)
+	for (i32 i = 0; i < count; ++i)
 	{
 		std::string ext = GetFileExtension(paths[i]);
 		if (ext == "hdr")
@@ -2020,6 +1904,7 @@ static void DropCallback(GLFWwindow* window, int count, const char** paths)
 		}
 		else
 		{
+			g_models.clear();
 			LoadScene(paths[i]);
 		}
 	}
@@ -2034,7 +1919,7 @@ void RenderCube()
 	if (g_cubeVAO == 0)
 	{
 		// clang-format off
-        float vertices[] = {
+        f32 vertices[] = {
             // back face
             -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 0.0f, // bottom-left
              1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 1.0f, // top-right
@@ -2088,11 +1973,11 @@ void RenderCube()
 		// link vertex attributes
 		glBindVertexArray(g_cubeVAO);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)0);
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)(3 * sizeof(f32)));
 		glEnableVertexAttribArray(2);
-		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)(6 * sizeof(f32)));
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
 		glBindVertexArray(0);
 	}
@@ -2102,8 +1987,7 @@ void RenderCube()
 	glBindVertexArray(0);
 }
 
-void APIENTRY
-DebugOutput(GLenum source, GLenum type, uint32_t id, GLenum severity, GLsizei length, const char* message, const void* userParam)
+void APIENTRY DebugOutput(GLenum source, GLenum type, u32 id, GLenum severity, GLsizei length, const char* message, const void* userParam)
 {
 	// ignore non-significant error/warning codes
 	if (id == 131169 || id == 131185 || id == 131218 || id == 131204)

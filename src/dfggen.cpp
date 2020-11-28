@@ -1,155 +1,146 @@
+
+#include "defines.h"
+#include "utils.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
 #include <algorithm>
-#include "dds.h"
-#include "csv.h"
+#include <vector>
 
-float const MATH_PI = 3.14159f;
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
+#include <glm/glm.hpp>
 
-uint32_t ReverseBits(uint32_t v)
+f32 Vis(f32 a, f32 NoV, f32 NoL)
 {
-	v = ((v >> 1) & 0x55555555) | ((v & 0x55555555) << 1);
-	v = ((v >> 2) & 0x33333333) | ((v & 0x33333333) << 2);
-	v = ((v >> 4) & 0x0F0F0F0F) | ((v & 0x0F0F0F0F) << 4);
-	v = ((v >> 8) & 0x00FF00FF) | ((v & 0x00FF00FF) << 8);
-	v = (v >> 16) | (v << 16);
-	return v;
+	// Heitz 2014, "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"
+	// Height-correlated GGX
+	const f32 a2    = a * a;
+	const f32 GGX_L = NoV * sqrtf((NoL - NoL * a2) * NoL + a2);
+	const f32 GGX_V = NoL * sqrtf((NoV - NoV * a2) * NoV + a2);
+	return 0.5f / (GGX_V + GGX_L);
 }
 
-union FP32
+inline glm::vec3 HemisphereImportanceSampleDGGX(const glm::vec2& u, const f32 a)
 {
-	unsigned u;
-	float    f;
-};
+	const f32 phi       = Tau * u.x;
+	const f32 cosTheta2 = (1.0f - u.y) / (1.0f + (a + 1.0f) * ((a - 1.0f) * u.y));
+	const f32 cosTheta  = sqrtf(cosTheta2);
+	const f32 sinTheta  = sqrtf(1.0f - cosTheta2);
+	return {sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta};
+}
 
-// https://gist.github.com/rygorous/2156668
-uint16_t FloatToHalf(float ff)
+glm::vec2 DFV(f32 NoV, f32 roughness, u32 sampleCount)
 {
-	FP32     f32infty   = {255 << 23};
-	FP32     f16infty   = {31 << 23};
-	FP32     magic      = {15 << 23};
-	unsigned sign_mask  = 0x80000000u;
-	unsigned round_mask = ~0xfffu;
+	glm::vec2 r(0.0f);
 
-	uint16_t o = 0;
-	FP32     f;
-	f.f = ff;
+	const glm::vec3 V(sqrtf(1.0f - NoV * NoV), 0.0f, NoV);
+	const f32       invSampleCount = 1.0f / sampleCount;
 
-	unsigned sign = f.u & sign_mask;
-	f.u ^= sign;
-
-	// NOTE all the integer compares in this function can be safely
-	// compiled into signed compares since all operands are below
-	// 0x80000000. Important if you want fast straight SSE2 code
-	// (since there's no unsigned PCMPGTD).
-
-	if (f.u >= f32infty.u)                        // Inf or NaN (all exponent bits set)
-		o = (f.u > f32infty.u) ? 0x7e00 : 0x7c00; // NaN->qNaN and Inf->Inf
-	else                                          // (De)normalized number or zero
+	for (u32 i = 0; i < sampleCount; ++i)
 	{
-		f.u &= round_mask;
-		f.f *= magic.f;
-		f.u -= round_mask;
-		if (f.u > f16infty.u)
-			f.u = f16infty.u; // Clamp to signed infinity if overflowed
-
-		o = uint16_t(f.u >> 13); // Take the bits!
-	}
-
-	o |= sign >> 16;
-	return o;
-}
-
-float Vis(float roughness, float ndotv, float ndotl)
-{
-	// GSmith correlated
-	float m    = roughness * roughness;
-	float m2   = m * m;
-	float visV = ndotl * sqrt(ndotv * (ndotv - ndotv * m2) + m2);
-	float visL = ndotv * sqrt(ndotl * (ndotl - ndotl * m2) + m2);
-	return 0.5f / (visV + visL);
-}
-
-int main()
-{
-	unsigned const LUT_WIDTH  = 128;
-	unsigned const LUT_HEIGHT = 128;
-	unsigned const sampleNum  = 512;
-
-	float    lutDataRGBA32F[LUT_WIDTH * LUT_HEIGHT * 4];
-	uint16_t lutDataRG16F[LUT_WIDTH * LUT_HEIGHT * 2];
-
-	for (unsigned y = 0; y < LUT_HEIGHT; ++y)
-	{
-		float const ndotv = (y + 0.5f) / LUT_HEIGHT;
-
-		for (unsigned x = 0; x < LUT_WIDTH; ++x)
+		const glm::vec2 u   = Hammersley(i, invSampleCount);
+		const glm::vec3 H   = HemisphereImportanceSampleDGGX(u, roughness);
+		const glm::vec3 L   = 2.0f * glm::dot(V, H) * H - V;
+		const f32       VoH = Saturate(glm::dot(V, H));
+		const f32       NoL = Saturate(L.z);
+		const f32       NoH = Saturate(H.z);
+		if (NoL > 0)
 		{
-			float const roughness = (x + 0.5f) / LUT_WIDTH;
-			float const m         = roughness * roughness;
-			float const m2        = m * m;
-
-			float const vx = sqrtf(1.0f - ndotv * ndotv);
-			float const vy = 0.0f;
-			float const vz = ndotv;
-
-			float scale = 0.0f;
-			float bias  = 0.0f;
-
-			for (unsigned i = 0; i < sampleNum; ++i)
-			{
-				float const e1 = (float)i / sampleNum;
-				float const e2 = (float)((double)ReverseBits(i) / (double)0x100000000LL);
-
-				float const phi      = 2.0f * MATH_PI * e1;
-				float const cosPhi   = cosf(phi);
-				float const sinPhi   = sinf(phi);
-				float const cosTheta = sqrtf((1.0f - e2) / (1.0f + (m2 - 1.0f) * e2));
-				float const sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
-
-				float const hx = sinTheta * cosf(phi);
-				float const hy = sinTheta * sinf(phi);
-				float const hz = cosTheta;
-
-				float const vdh = vx * hx + vy * hy + vz * hz;
-				float const lx  = 2.0f * vdh * hx - vx;
-				float const ly  = 2.0f * vdh * hy - vy;
-				float const lz  = 2.0f * vdh * hz - vz;
-
-				float const ndotl = std::max(lz, 0.0f);
-				float const ndoth = std::max(hz, 0.0f);
-				float const vdoth = std::max(vdh, 0.0f);
-
-				if (ndotl > 0.0f)
-				{
-					float const vis         = Vis(roughness, ndotv, ndotl);
-					float const ndotlVisPDF = ndotl * vis * (4.0f * vdoth / ndoth);
-					float const fresnel     = powf(1.0f - vdoth, 5.0f);
-
-					scale += ndotlVisPDF * (1.0f - fresnel);
-					bias += ndotlVisPDF * fresnel;
-				}
-			}
-			scale /= sampleNum;
-			bias /= sampleNum;
-
-			lutDataRGBA32F[x * 4 + y * LUT_WIDTH * 4 + 0] = scale;
-			lutDataRGBA32F[x * 4 + y * LUT_WIDTH * 4 + 1] = bias;
-			lutDataRGBA32F[x * 4 + y * LUT_WIDTH * 4 + 2] = 0.0f;
-			lutDataRGBA32F[x * 4 + y * LUT_WIDTH * 4 + 3] = 0.0f;
-
-			lutDataRG16F[x * 2 + y * LUT_WIDTH * 2 + 0] = FloatToHalf(scale);
-			lutDataRG16F[x * 2 + y * LUT_WIDTH * 2 + 1] = FloatToHalf(bias);
+			/*
+			 * Fc = (1 - V•H)^5
+			 * F(h) = f0*(1 - Fc) + f90*Fc
+			 *
+			 * f0 and f90 are known at runtime, but thankfully can be factored out, allowing us
+			 * to split the integral in two terms and store both terms separately in a LUT.
+			 *
+			 * At runtime, we can reconstruct Er() exactly as below:
+			 *
+			 *            4                      <v•h>
+			 *   DFV.x = --- ∑ (1 - Fc) V(v, l) ------- <n•l>
+			 *            N  h                   <n•h>
+			 *
+			 *
+			 *            4                      <v•h>
+			 *   DFV.y = --- ∑ (    Fc) V(v, l) ------- <n•l>
+			 *            N  h                   <n•h>
+			 *
+			 *
+			 *   Er() = f0 * DFV.x + f90 * DFV.y
+			 */
+			const f32 v  = Vis(roughness, NoV, NoL) * NoL * (VoH / NoH);
+			const f32 Fc = Pow5(1.0 - VoH);
+			r.x += v * (1.0f - Fc);
+			r.y += v * Fc;
 		}
 	}
 
-	SaveDDS("integrateDFG_RGBA32F.dds", DDS_FORMAT_R32G32B32A32_FLOAT, 16, LUT_WIDTH, LUT_HEIGHT, lutDataRGBA32F);
-	SaveDDS("integrateDFG_RG16F.dds", DDS_FORMAT_R16G16_FLOAT, 4, LUT_WIDTH, LUT_HEIGHT, lutDataRG16F);
-	SaveCSV("ndotv.csv", LUT_WIDTH);
-	SaveCSV("gloss.csv", LUT_HEIGHT);
-	SaveCSV("scale.csv", lutDataRGBA32F, LUT_WIDTH, LUT_HEIGHT, 0);
-	SaveCSV("bias.csv", lutDataRGBA32F, LUT_WIDTH, LUT_HEIGHT, 1);
+	return 4.0f * r * invSampleCount;
+}
 
-	return 0;
+std::vector<glm::vec3> PrecomputeDFG(u32 w, u32 h, u32 sampleCount) // 128, 128, 512
+{
+	std::vector<glm::vec3> lutDataRG32F;
+	lutDataRG32F.resize(w * h);
+
+	for (u32 y = 0; y < h; ++y)
+	{
+		const f32 roughness       = Saturate((h - y + 0.5f) / h);
+		const f32 linearRoughness = roughness * roughness;
+		for (u32 x = 0; x < w; ++x)
+		{
+			const f32 NoV = Saturate((x + 0.5f) / w);
+			// const f32 m2  = m * m;
+
+			// const f32 vx = sqrtf(1.0f - NoV * NoV);
+			// const f32 vy = 0.0f;
+			// const f32 vz = NoV;
+
+			// f32 scale = 0.0f;
+			// f32 bias  = 0.0f;
+
+			const glm::vec2 d = DFV(NoV, linearRoughness, sampleCount);
+
+			lutDataRG32F[y * w + x] = glm::vec3(d.x, d.y, 0.0);
+
+			// for (u32 i = 0; i < sampleCount; ++i)
+			// {
+			// 	const glm::vec2 h = Hammersley(i, 1.0f / sampleCount);
+
+			// 	const f32 phi      = 2.0f * MATH_PI * h.x;
+			// 	const f32 cosPhi   = cosf(phi);
+			// 	const f32 sinPhi   = sinf(phi);
+			// 	const f32 cosTheta = sqrtf((1.0f - h.y) / (1.0f + (m2 - 1.0f) * h.y));
+			// 	const f32 sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
+
+			// 	const f32 hx = sinTheta * cosf(phi);
+			// 	const f32 hy = sinTheta * sinf(phi);
+			// 	const f32 hz = cosTheta;
+
+			// 	const f32 vdh = vx * hx + vy * hy + vz * hz;
+			// 	const f32 lx  = 2.0f * vdh * hx - vx;
+			// 	const f32 ly  = 2.0f * vdh * hy - vy;
+			// 	const f32 lz  = 2.0f * vdh * hz - vz;
+
+			// 	const f32 NoL   = std::max(lz, 0.0f);
+			// 	const f32 ndoth = std::max(hz, 0.0f);
+			// 	const f32 vdoth = std::max(vdh, 0.0f);
+
+			// 	if (NoL > 0.0f)
+			// 	{
+			// 		const f32 vis         = Vis(roughness, NoV, NoL);
+			// 		const f32 ndotlVisPDF = NoL * vis * (4.0f * vdoth / ndoth);
+			// 		const f32 fresnel     = powf(1.0f - vdoth, 5.0f);
+
+			// 		scale += ndotlVisPDF * (1.0f - fresnel);
+			// 		bias += ndotlVisPDF * fresnel;
+			// 	}
+			// }
+			// scale /= sampleCount;
+			// bias /= sampleCount;
+		}
+	}
+
+	return lutDataRG32F;
 }

@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 add_subdirectory(external)
 
-add_executable(viewer src/main.cpp)
+add_executable(viewer src/main.cpp src/dfggen.cpp)
 target_link_libraries(viewer PRIVATE glm glfw glad stb imgui assimp)
 target_compile_definitions(viewer PRIVATE $<$<CONFIG:Debug>:_DEBUG=1>)
 
