@@ -1,6 +1,6 @@
 
-#include "defines.h"
-#include "utils.h"
+#include "core/defines.h"
+#include "core/utils.h"
 
 #include <stdint.h>
 #include <stdlib.h>

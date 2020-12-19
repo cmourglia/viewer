@@ -1,5 +1,9 @@
-#include "defines.h"
-#include "utils.h"
+#include "core/defines.h"
+#include "core/utils.h"
+#include "renderer/program.h"
+#include "renderer/material.h"
+#include "renderer/environment.h"
+#include "renderer/render_primitives.h"
 
 #include <glad/glad.h>
 #include <glfw/glfw3.h>
@@ -75,8 +79,8 @@ struct Camera
 	f32 distance = 1.0f;
 
 	glm::vec3 position;
-	glm::vec3 center;
-	glm::vec3 up;
+	glm::vec3 center = glm::vec3(0.0f, 0.0f, 0.0f);
+	glm::vec3 up     = glm::vec3(0.0f, 1.0f, 0.0f);
 
 	glm::mat4 GetView()
 	{
@@ -84,300 +88,10 @@ struct Camera
 		const f32 y = distance * cosf(theta * ToRadians);
 		const f32 z = distance * sinf(theta * ToRadians) * cosf(phi * ToRadians);
 
-		position = glm::vec3(x, y, z);
-		center   = glm::vec3(0.0f, 0.0f, 0.0f);
-		up       = glm::vec3(0.0f, 1.0f, 0.0f);
+		position = glm::vec3(x, y, z) + center;
 
 		return glm::lookAt(position, center, up);
 	}
-};
-
-u32 CompileShader(const char* filename, GLenum shaderType, const std::vector<const char*>& defines)
-{
-	FILE* file = fopen(filename, "r");
-	if (!file)
-	{
-		return 0;
-	}
-
-	fseek(file, SEEK_SET, SEEK_END);
-	long filesize = ftell(file);
-	rewind(file);
-
-	std::string src;
-	src.resize(filesize);
-	filesize = (size_t)fread(src.data(), 1, filesize, file);
-	src.resize(filesize);
-
-	fclose(file);
-
-	std::vector<std::string> completeShader;
-	completeShader.push_back("#version 450\n");
-	for (const auto& define : defines)
-	{
-		completeShader.push_back(std::string("#define ") + define + "\n");
-	}
-	completeShader.push_back(std::move(src));
-
-	char** finalSrc = new char*[completeShader.size()];
-	for (size_t i = 0; i < completeShader.size(); ++i)
-	{
-		finalSrc[i] = new char[completeShader[i].size() + 1];
-		strcpy(finalSrc[i], completeShader[i].data());
-	}
-
-	u32 shader = glCreateShader(shaderType);
-
-	glShaderSource(shader, completeShader.size(), finalSrc, nullptr);
-	GLenum error = glGetError();
-	glCompileShader(shader);
-
-	i32 compiled = GL_FALSE;
-	glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
-
-	for (size_t i = 0; i < completeShader.size(); ++i)
-	{
-		delete[] finalSrc[i];
-	}
-	delete[] finalSrc;
-
-	if (!compiled)
-	{
-		char error[512];
-		glGetShaderInfoLog(shader, 512, nullptr, error);
-		fprintf(stderr, "Could not compile shader %s: %s\n", filename, error);
-		glDeleteShader(shader);
-		shader = 0;
-	}
-
-	return shader;
-}
-
-struct shader
-{
-	GLenum                          type;
-	const char*                     filename;
-	std::filesystem::file_time_type time;
-};
-
-class Program
-{
-public:
-	static Program MakeRender(const char*                     name,
-	                          const char*                     vsfile,
-	                          const char*                     fsfile  = nullptr,
-	                          const std::vector<const char*>& defines = std::vector<const char*>())
-	{
-		auto program = Program{name};
-
-		program.m_defines = defines;
-		program.m_shaders.push_back({GL_VERTEX_SHADER, vsfile, std::filesystem::last_write_time(vsfile)});
-
-		if (fsfile != nullptr)
-		{
-			program.m_shaders.push_back({GL_FRAGMENT_SHADER, fsfile, std::filesystem::last_write_time(fsfile)});
-		}
-
-		program.Build();
-
-		return program;
-	}
-
-	static Program MakeCompute(const char* name, const char* csfile)
-	{
-		auto program = Program{name};
-
-		program.m_shaders.push_back({GL_COMPUTE_SHADER, csfile, std::filesystem::last_write_time(csfile)});
-		program.Build();
-
-		return program;
-	}
-
-	explicit Program(const char* name = "")
-	    : m_name(name)
-	{
-	}
-
-	void Update()
-	{
-		bool needsUpdate = false;
-
-		for (auto&& shader : m_shaders)
-		{
-			auto shaderTime = std::filesystem::last_write_time(shader.filename);
-			if (shaderTime > shader.time)
-			{
-				needsUpdate = true;
-				shader.time = shaderTime;
-			}
-		}
-
-		if (needsUpdate)
-		{
-			Build();
-		}
-	}
-
-	void Bind()
-	{
-		glUseProgram(m_id);
-	}
-
-	void SetUniform(const char* name, int32_t value) const
-	{
-		glUniform1i(GetLocation(name), value);
-	}
-	void SetUniform(const char* name, u32 value) const
-	{
-		glUniform1ui(GetLocation(name), value);
-	}
-	void SetUniform(const char* name, f32 value) const
-	{
-		glUniform1f(GetLocation(name), value);
-	}
-	void SetUniform(const char* name, const glm::vec2& value) const
-	{
-		glUniform2fv(GetLocation(name), 1, &value[0]);
-	}
-	void SetUniform(const char* name, const glm::vec3& value) const
-	{
-		glUniform3fv(GetLocation(name), 1, &value[0]);
-	}
-	void SetUniform(const char* name, const glm::vec4& value) const
-	{
-		glUniform4fv(GetLocation(name), 1, &value[0]);
-	}
-	void SetUniform(const char* name, const glm::mat2& value) const
-	{
-		glUniformMatrix2fv(GetLocation(name), 1, false, &value[0][0]);
-	}
-	void SetUniform(const char* name, const glm::mat3& value) const
-	{
-		glUniformMatrix3fv(GetLocation(name), 1, false, &value[0][0]);
-	}
-	void SetUniform(const char* name, const glm::mat4& value) const
-	{
-		glUniformMatrix4fv(GetLocation(name), 1, false, &value[0][0]);
-	}
-
-private:
-	void Build()
-	{
-		std::vector<GLuint> shaders;
-
-		bool allValid = true;
-
-		for (const auto& shader : m_shaders)
-		{
-			GLuint shaderID = CompileShader(shader.filename, shader.type, m_defines);
-			if (glIsShader(shaderID))
-			{
-				shaders.push_back(shaderID);
-			}
-			else
-			{
-				allValid = false;
-				break;
-			}
-		}
-
-		if (!allValid)
-		{
-			for (auto shader : shaders)
-			{
-				glDeleteShader(shader);
-			}
-			return;
-		}
-
-		GLuint program = glCreateProgram();
-
-		for (GLuint shader : shaders)
-		{
-			if (glIsShader(shader))
-			{
-				glAttachShader(program, shader);
-			}
-		}
-
-		glLinkProgram(program);
-
-		i32 linked = GL_FALSE;
-		glGetProgramiv(program, GL_LINK_STATUS, &linked);
-
-		if (!linked)
-		{
-			char error[512];
-			glGetProgramInfoLog(program, 512, nullptr, error);
-			fprintf(stderr, "Could not link program %s: %s\n", m_name, error);
-			glDeleteProgram(program);
-			program = 0;
-		}
-
-		for (GLuint shader : shaders)
-		{
-			if (glIsShader(shader))
-			{
-				glDetachShader(program, shader);
-				glDeleteShader(shader);
-			}
-		}
-
-		if (glIsProgram(program))
-		{
-			m_id = program;
-			GetUniformInfos();
-		}
-	}
-
-	void GetUniformInfos()
-	{
-		GLint uniformCount = 0;
-		glGetProgramiv(m_id, GL_ACTIVE_UNIFORMS, &uniformCount);
-
-		if (uniformCount != 0)
-		{
-			GLint   maxNameLength = 0;
-			GLsizei length        = 0;
-			GLsizei count         = 0;
-			GLenum  type          = GL_NONE;
-			glGetProgramiv(m_id, GL_ACTIVE_UNIFORM_MAX_LENGTH, &maxNameLength);
-
-			char* uniformName = new char[maxNameLength];
-
-			for (GLint i = 0; i < uniformCount; ++i)
-			{
-				glGetActiveUniform(m_id, i, maxNameLength, &length, &count, &type, uniformName);
-
-				GLint location = glGetUniformLocation(m_id, uniformName);
-
-				m_uniforms.emplace(std::make_pair(std::string(uniformName, length), location));
-			}
-
-			delete[] uniformName;
-		}
-	}
-
-	GLint GetLocation(const char* name) const
-	{
-		auto it = m_uniforms.find(name);
-		return (it == m_uniforms.end()) ? -1 : it->second;
-	}
-
-private:
-	using Shader  = std::pair<const char*, GLenum>;
-	using Shaders = std::vector<Shader>;
-
-	using ShaderTime  = std::pair<const char*, std::filesystem::file_time_type>;
-	using ShaderTimes = std::vector<ShaderTime>;
-
-	const char* m_name = nullptr;
-
-	std::unordered_map<std::string, GLint> m_uniforms;
-
-	GLuint                   m_id = 0;
-	std::vector<shader>      m_shaders;
-	std::vector<const char*> m_defines;
 };
 
 static std::unordered_map<u32, Program>        g_programs;
@@ -440,220 +154,19 @@ GLuint LoadTexture(const std::string& filename)
 	return texture;
 }
 
-static GLuint g_irradianceMap;
-static GLuint g_radianceMap;
-static GLuint g_envCubeMap;
-static GLuint g_iblDFG;
-
-struct Material
-{
-	Material(const char* matName, const char* baseVS, const char* baseFS)
-	    : m_name(matName)
-	    , m_baseVS(baseVS)
-	    , m_baseFS(baseFS)
-	{
-	}
-
-	u32 GetMask() const
-	{
-		// clang-format off
-		const u32 result = 0
-			| hasAlbedo                   << 0
-			| hasAlbedoTexture            << 1
-			| hasRoughness                << 2
-			| hasRoughnessTexture         << 3
-			| hasMetallic                 << 4
-			| hasMetallicTexture          << 5
-			| hasMetallicRoughnessTexture << 6
-			| hasEmissive                 << 7
-			| hasEmissiveTexture          << 8
-			| hasNormalMap                << 9
-			| hasAmbientOcclusionMap      << 10;
-
-		// clang-format on
-		return result;
-	}
-
-	void Bind(Program* program)
-	{
-		if (hasAlbedo)
-			program->SetUniform("u_albedo", albedo);
-		if (hasRoughness)
-			program->SetUniform("u_roughness", roughness);
-		if (hasMetallic)
-			program->SetUniform("u_metallic", metallic);
-		if (hasEmissive)
-			program->SetUniform("u_emissive", emissive);
-
-		GLint index = 0;
-
-		if (hasAlbedoTexture)
-		{
-			program->SetUniform("s_albedo", index);
-			glBindTextureUnit(index, albedoTexture);
-			++index;
-		}
-
-		if (hasRoughnessTexture)
-		{
-			program->SetUniform("s_roughness", index);
-			glBindTextureUnit(index, roughnessTexture);
-			++index;
-		}
-
-		if (hasMetallicTexture)
-		{
-			program->SetUniform("s_metallic", index);
-			glBindTextureUnit(index, metallicTexture);
-			++index;
-		}
-
-		if (hasMetallicRoughnessTexture)
-		{
-			program->SetUniform("s_metallicRoughness", index);
-			glBindTextureUnit(index, metallicRoughnessTexture);
-			++index;
-		}
-
-		if (hasEmissiveTexture)
-		{
-			program->SetUniform("s_emissive", index);
-			glBindTextureUnit(index, emissiveTexture);
-			++index;
-		}
-
-		if (hasNormalMap)
-		{
-			program->SetUniform("s_normal", index);
-			glBindTextureUnit(index, normalMap);
-			++index;
-		}
-
-		if (hasAmbientOcclusionMap)
-		{
-			program->SetUniform("s_ambientOcclusion", index);
-			glBindTextureUnit(index, ambientOcclusionMap);
-			++index;
-		}
-
-		program->SetUniform("s_irradianceMap", index);
-		glBindTextureUnit(index, g_irradianceMap);
-		++index;
-
-		program->SetUniform("s_radianceMap", index);
-		glBindTextureUnit(index, g_radianceMap);
-		// glBindTextureUnit(index, g_envCubeMap);
-		++index;
-
-		program->SetUniform("s_iblDFG", index);
-		glBindTextureUnit(index, g_iblDFG);
-		++index;
-	}
-
-	Program BuildProgram()
-	{
-		return Program::MakeRender(m_name, m_baseVS, m_baseFS, GetDefines());
-	}
-
-private:
-	std::vector<const char*> GetDefines()
-	{
-		std::vector<const char*> defines;
-
-		if (hasAlbedoTexture)
-		{
-			defines.push_back("HAS_ALBEDO_TEXTURE");
-		}
-		if (hasRoughnessTexture)
-		{
-			defines.push_back("HAS_ROUGHNESS_TEXTURE");
-		}
-		if (hasMetallicTexture)
-		{
-			defines.push_back("HAS_METALLIC_TEXTURE");
-		}
-		if (hasMetallicRoughnessTexture)
-		{
-			defines.push_back("HAS_METALLIC_ROUGHNESS_TEXTURE");
-		}
-		if (hasEmissive)
-		{
-			defines.push_back("HAS_EMISSIVE");
-		}
-		if (hasEmissiveTexture)
-		{
-			defines.push_back("HAS_EMISSIVE_TEXTURE");
-		}
-		if (hasNormalMap)
-		{
-			defines.push_back("HAS_NORMAL_MAP");
-		}
-		if (hasAmbientOcclusionMap)
-		{
-			defines.push_back("HAS_AMBIENT_OCCLUSION_MAP");
-		}
-
-		return defines;
-	}
-
-private:
-	const char* m_name;
-	const char* m_baseVS;
-	const char* m_baseFS;
-
-public:
-	glm::vec3 albedo;
-	f32       roughness;
-	f32       metallic;
-	glm::vec3 emissive;
-
-	GLuint albedoTexture            = 0;
-	GLuint roughnessTexture         = 0;
-	GLuint metallicTexture          = 0;
-	GLuint metallicRoughnessTexture = 0;
-	GLuint emissiveTexture          = 0;
-	GLuint normalMap                = 0;
-	GLuint ambientOcclusionMap      = 0;
-
-	bool hasAlbedo                   = false;
-	bool hasRoughness                = false;
-	bool hasMetallic                 = false;
-	bool hasMetallicRoughnessTexture = false;
-	bool hasEmissive                 = false;
-	bool hasAlbedoTexture            = false;
-	bool hasRoughnessTexture         = false;
-	bool hasMetallicTexture          = false;
-	bool hasEmissiveTexture          = false;
-	bool hasNormalMap                = false;
-	bool hasAmbientOcclusionMap      = false;
-
-private:
-	bool m_padding0;
-	bool m_padding1;
-	bool m_padding2;
-	bool m_padding3;
-	bool m_padding4;
-};
-
 struct RenderContext
 {
 	glm::vec3 eyePosition;
 	glm::mat4 model, view, proj;
 
 	glm::vec3 lightDirection;
+
+	Environment* env;
 };
 
 void SetupShader(RenderContext* context, Material* material)
 {
-	const u32 mask = material->GetMask();
-
-	if (g_programs.find(mask) == g_programs.end())
-	{
-		Program program = material->BuildProgram();
-		g_programs.emplace(std::make_pair(mask, program));
-	}
-
-	Program* program = &g_programs[mask];
+	Program* program = material->GetProgram();
 
 	program->Bind();
 
@@ -662,7 +175,7 @@ void SetupShader(RenderContext* context, Material* material)
 	program->SetUniform("u_view", context->view);
 	program->SetUniform("u_proj", context->proj);
 
-	material->Bind(program);
+	material->Bind(program, context->env);
 }
 
 enum DataType
@@ -963,7 +476,7 @@ void RenderUI(std::vector<Model>* models);
 
 f32 g_lastScroll = 0.0f;
 
-GLuint Render(std::vector<Model>* models, const glm::vec2& size);
+GLuint Render(std::vector<Model>* models, const glm::vec2& size, Environment* env);
 
 GLuint fbos[2];
 GLuint rts[3];
@@ -1152,254 +665,13 @@ void LoadScene(const char* filename)
 	ProcessNode(scene->mRootNode, scene, glm::mat4(1.0f), p);
 }
 
-static Program g_equirectangularToCubemapProgram;
-static Program g_prefilterEnvmapProgram;
-static Program g_irradianceProgram;
-static Program g_backgroundProgram;
-static Mesh    g_cubeMesh;
-
-void LoadEnvironment(const char* filename)
-{
-	stbi_set_flip_vertically_on_load(true);
-
-	i32  w, h, c;
-	f32* data = stbi_loadf(filename, &w, &h, &c, 0);
-
-	stbi_set_flip_vertically_on_load(false);
-
-	if (data == nullptr)
-	{
-		return;
-	}
-
-	const u32 cubemapSize = 512;
-
-	GLuint equirectangularTexture;
-	glCreateTextures(GL_TEXTURE_2D, 1, &equirectangularTexture);
-
-	const i32 levels = log2f(Min(w, h));
-
-	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
-	glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
-	glTextureSubImage2D(equirectangularTexture, 0, 0, 0, w, h, GL_RGB, GL_FLOAT, data);
-	glTextureParameteri(equirectangularTexture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(equirectangularTexture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(equirectangularTexture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTextureParameteri(equirectangularTexture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	stbi_image_free(data);
-
-	if (glIsTexture(g_envCubeMap))
-	{
-		glDeleteTextures(1, &g_envCubeMap);
-	}
-
-	glGenTextures(1, &g_envCubeMap);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
-
-	// glTextureStorage2D(g_envCubeMap, 1, GL_RGB32F, cubemapSize, cubemapSize);
-	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	// glTextureParameteri(g_envCubeMap, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-
-	for (i32 face = 0; face < 6; ++face)
-	{
-		// face:
-		// 0 -> positive x
-		// 1 -> negative x
-		// 2 -> positive y
-		// 3 -> negative y
-		// 4 -> positive z
-		// 5 -> negative z
-		// glTextureSubImage3D(g_envCubeMap, 0, 0, 0, face, cubemapSize, cubemapSize, 1, GL_RGB, GL_HALF_FLOAT, nullptr);
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, cubemapSize, cubemapSize, 0, GL_RGB, GL_FLOAT, nullptr);
-	}
-
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	// clang-format off
-	const glm::mat4 captureProjection = glm::perspective(Pi * 0.5f, 1.0f, 0.1f, 10.0f);
-	const glm::mat4 captureViews[]    = {
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
-    };
-	// clang-format on
-
-	GLuint captureFBO, captureRBO;
-	glGenFramebuffers(1, &captureFBO);
-	glGenRenderbuffers(1, &captureRBO);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
-	glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, cubemapSize, cubemapSize);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
-
-	g_equirectangularToCubemapProgram.Bind();
-	g_equirectangularToCubemapProgram.SetUniform("equirectangularMap", 0);
-	glBindTextureUnit(0, equirectangularTexture);
-	g_equirectangularToCubemapProgram.SetUniform("proj", captureProjection);
-	glViewport(0, 0, cubemapSize, cubemapSize);
-
-	glDepthFunc(GL_ALWAYS);
-	for (i32 face = 0; face < 6; ++face)
-	{
-		g_equirectangularToCubemapProgram.SetUniform("view", captureViews[face]);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_envCubeMap, 0);
-
-		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		{
-			fprintf(stderr, "framebuffer incomplete\n");
-		}
-
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		glClearDepth(1.0f);
-		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-		// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
-		// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
-
-		RenderCube();
-	}
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	glFlush();
-	glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
-
-	// Generate mipmaps
-	if (glIsTexture(g_radianceMap))
-	{
-		glDeleteTextures(1, &g_radianceMap);
-	}
-
-	glGenTextures(1, &g_radianceMap);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_radianceMap);
-
-	for (i32 face = 0; face < 6; ++face)
-	{
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, cubemapSize, cubemapSize, 0, GL_RGB, GL_FLOAT, nullptr);
-	}
-
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glGenerateMipmap(GL_TEXTURE_CUBE_MAP); // Allocate memory
-
-	g_prefilterEnvmapProgram.Bind();
-	g_prefilterEnvmapProgram.SetUniform("envmap", 0);
-	glBindTextureUnit(0, g_envCubeMap);
-	g_prefilterEnvmapProgram.SetUniform("proj", captureProjection);
-
-	u32 mipLevels = (u32)log2f((float)cubemapSize);
-	u32 mipSize   = cubemapSize;
-
-	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
-
-	for (u32 mip = 0; mip < mipLevels; ++mip)
-	{
-		glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipSize, mipSize);
-
-		glViewport(0, 0, mipSize, mipSize);
-
-		const f32 roughness = (f32)mip / (f32)(mipLevels - 1);
-		g_prefilterEnvmapProgram.SetUniform("roughness", roughness);
-
-		for (i32 face = 0; face < 6; ++face)
-		{
-			g_prefilterEnvmapProgram.SetUniform("view", captureViews[face]);
-			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_radianceMap, mip);
-
-			if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-			{
-				fprintf(stderr, "framebuffer incomplete\n");
-			}
-
-			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-			glClearDepth(1.0f);
-			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-			// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
-			// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
-
-			RenderCube();
-		}
-
-		mipSize /= 2;
-
-		glBindRenderbuffer(GL_RENDERBUFFER, 0);
-	}
-
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	if (glIsTexture(g_irradianceMap))
-	{
-		glDeleteTextures(1, &g_irradianceMap);
-	}
-
-	glGenTextures(1, &g_irradianceMap);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_irradianceMap);
-
-	for (i32 face = 0; face < 6; ++face)
-	{
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGB32F, 64, 64, 0, GL_RGB, GL_FLOAT, nullptr);
-	}
-
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
-	glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 64, 64);
-
-	g_irradianceProgram.Bind();
-	g_irradianceProgram.SetUniform("envMap", 0);
-	glBindTextureUnit(0, g_envCubeMap);
-	g_irradianceProgram.SetUniform("proj", captureProjection);
-	glViewport(0, 0, 64, 64);
-
-	glDepthFunc(GL_ALWAYS);
-	for (i32 face = 0; face < 6; ++face)
-	{
-		g_irradianceProgram.SetUniform("view", captureViews[face]);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, g_irradianceMap, 0);
-
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		glClearDepth(1.0f);
-		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-		// glClearNamedFramebufferfv(captureFBO, GL_COLOR, 0, clearColor);
-		// glClearNamedFramebufferfv(captureFBO, GL_DEPTH, 0, &clearDepth);
-
-		if (glCheckNamedFramebufferStatus(captureFBO, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		{
-			fprintf(stderr, "framebuffer incomplete\n");
-		}
-
-		RenderCube();
-	}
-	glDepthFunc(GL_LESS);
-
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	glDeleteRenderbuffers(1, &captureRBO);
-	glDeleteFramebuffers(1, &captureFBO);
-}
+static Program* g_backgroundProgram;
+static Mesh     g_cubeMesh;
 
 glm::vec3 g_lightDirection    = glm::vec3(0, -1, 0);
 bool      g_showIrradianceMap = false;
+
+Environment g_env;
 
 i32 main()
 {
@@ -1445,29 +717,25 @@ i32 main()
 
 	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
-	g_equirectangularToCubemapProgram = Program::MakeRender("equirectangularToCubemap",
-	                                                        "resources/shaders/cubemap.vert",
-	                                                        "resources/shaders/equirectangularToCubemap.frag");
-
-	g_prefilterEnvmapProgram = Program::MakeRender("prefilterEnvmap", "resources/shaders/cubemap.vert", "resources/shaders/prefilter.frag");
-
-	g_irradianceProgram = Program::MakeRender("irradiance", "resources/shaders/cubemap.vert", "resources/shaders/irradiance.frag");
+	Program::MakeRender("equirectangularToCubemap", "resources/shaders/cubemap.vert", "resources/shaders/equirectangularToCubemap.frag");
+	Program::MakeRender("prefilterEnvmap", "resources/shaders/cubemap.vert", "resources/shaders/prefilter.frag");
+	Program::MakeRender("irradiance", "resources/shaders/cubemap.vert", "resources/shaders/irradiance.frag");
 	g_backgroundProgram = Program::MakeRender("background", "resources/shaders/background.vert", "resources/shaders/background.frag");
 
-	glCreateTextures(GL_TEXTURE_2D, 1, &g_iblDFG);
+	glCreateTextures(GL_TEXTURE_2D, 1, &g_env.iblDFG);
 
 	const i32 levels = 1;
 
 	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
-	glTextureStorage2D(g_iblDFG, 1, GL_RGB32F, 128, 128);
-	// glTextureSubImage2D(g_iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1).data());
-	glTextureSubImage2D(g_iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1024).data());
-	glTextureParameteri(g_iblDFG, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(g_iblDFG, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(g_iblDFG, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTextureParameteri(g_iblDFG, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTextureStorage2D(g_env.iblDFG, 1, GL_RGB32F, 128, 128);
+	// glTextureSubImage2D(g_env.iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1).data());
+	glTextureSubImage2D(g_env.iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1024).data());
+	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr");
+	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr", &g_env);
 
 	// LoadScene("external/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf");
 	// LoadScene(R"(W:\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
@@ -1566,12 +834,12 @@ i32 main()
 			switch (g_renderMode)
 			{
 				case RenderMode_IBL_DFG:
-					id = (void*)(intptr_t)g_iblDFG;
+					id = (void*)(intptr_t)g_env.iblDFG;
 					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 0), ImVec2(1, 1));
 					break;
 				case RenderMode_Default:
 				default:
-					id = (void*)(intptr_t)Render(&g_models, size);
+					id = (void*)(intptr_t)Render(&g_models, size, &g_env);
 					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
 			}
 			// ImTextureID
@@ -1785,7 +1053,7 @@ void SetupUI(GLFWwindow* window)
 	ImGui_ImplOpenGL3_Init("#version 450");
 }
 
-GLuint Render(std::vector<Model>* models, const glm::vec2& size)
+GLuint Render(std::vector<Model>* models, const glm::vec2& size, Environment* env)
 {
 	static auto lastSize = glm::vec2(0, 0);
 
@@ -1833,16 +1101,6 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, msaaFramebuffer);
 
-	for (auto&& program : g_programs)
-	{
-		program.second.Update();
-	}
-
-	g_backgroundProgram.Update();
-	g_equirectangularToCubemapProgram.Update();
-	g_prefilterEnvmapProgram.Update();
-	g_irradianceProgram.Update();
-
 	glViewport(0, 0, size.x, size.y);
 
 	glClearDepth(1.0f);
@@ -1856,19 +1114,25 @@ GLuint Render(std::vector<Model>* models, const glm::vec2& size)
 	    .eyePosition = g_camera.position,
 	    .view        = g_camera.GetView(),
 	    .proj        = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.001f, 100.0f),
+	    .env         = env,
 	};
+
+	// static GLuint g_irradianceMap;
+	// static GLuint g_radianceMap;
+	// static GLuint g_envCubeMap;
+	// static GLuint g_iblDFG;
 
 	for (auto&& model : *models)
 	{
 		model.Draw(&context);
 	}
 
-	g_backgroundProgram.Bind();
-	g_backgroundProgram.SetUniform("envmap", 0);
-	g_backgroundProgram.SetUniform("view", context.view);
-	g_backgroundProgram.SetUniform("proj", context.proj);
+	g_backgroundProgram->Bind();
+	g_backgroundProgram->SetUniform("envmap", 0);
+	g_backgroundProgram->SetUniform("view", context.view);
+	g_backgroundProgram->SetUniform("proj", context.proj);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_radianceMap : g_envCubeMap);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? env->radianceMap : env->envMap);
 	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_irradianceMap : g_envCubeMap);
 	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
 	RenderCube();
@@ -1900,7 +1164,7 @@ static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 		std::string ext = GetFileExtension(paths[i]);
 		if (ext == "hdr")
 		{
-			LoadEnvironment(paths[i]);
+			LoadEnvironment(paths[i], &g_env);
 		}
 		else
 		{
@@ -1908,83 +1172,6 @@ static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 			LoadScene(paths[i]);
 		}
 	}
-}
-
-void RenderCube()
-{
-	static GLuint g_cubeVAO = 0;
-	static GLuint g_cubeVBO = 0;
-
-	// initialize (if necessary)
-	if (g_cubeVAO == 0)
-	{
-		// clang-format off
-        f32 vertices[] = {
-            // back face
-            -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 0.0f, // bottom-left
-             1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 1.0f, // top-right
-             1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 0.0f, // bottom-right
-             1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 1.0f, 1.0f, // top-right
-            -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 0.0f, // bottom-left
-            -1.0f,  1.0f, -1.0f,  0.0f,  0.0f, -1.0f, 0.0f, 1.0f, // top-left
-            // front face
-            -1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 0.0f, // bottom-left
-             1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 0.0f, // bottom-right
-             1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 1.0f, // top-right
-             1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 1.0f, 1.0f, // top-right
-            -1.0f,  1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 1.0f, // top-left
-            -1.0f, -1.0f,  1.0f,  0.0f,  0.0f,  1.0f, 0.0f, 0.0f, // bottom-left
-            // left face
-            -1.0f,  1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-right
-            -1.0f,  1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 1.0f, // top-left
-            -1.0f, -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-left
-            -1.0f, -1.0f, -1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-left
-            -1.0f, -1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 0.0f, 0.0f, // bottom-right
-            -1.0f,  1.0f,  1.0f, -1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-right
-            // right face
-             1.0f,  1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-left
-             1.0f, -1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-right
-             1.0f,  1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 1.0f, // top-right
-             1.0f, -1.0f, -1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 1.0f, // bottom-right
-             1.0f,  1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 1.0f, 0.0f, // top-left
-             1.0f, -1.0f,  1.0f,  1.0f,  0.0f,  0.0f, 0.0f, 0.0f, // bottom-left
-            // bottom face
-            -1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 1.0f, // top-right
-             1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 1.0f, // top-left
-             1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 0.0f, // bottom-left
-             1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 1.0f, 0.0f, // bottom-left
-            -1.0f, -1.0f,  1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 0.0f, // bottom-right
-            -1.0f, -1.0f, -1.0f,  0.0f, -1.0f,  0.0f, 0.0f, 1.0f, // top-right
-            // top face
-            -1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 1.0f, // top-left
-             1.0f,  1.0f , 1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 0.0f, // bottom-right
-             1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 1.0f, // top-right
-             1.0f,  1.0f,  1.0f,  0.0f,  1.0f,  0.0f, 1.0f, 0.0f, // bottom-right
-            -1.0f,  1.0f, -1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 1.0f, // top-left
-            -1.0f,  1.0f,  1.0f,  0.0f,  1.0f,  0.0f, 0.0f, 0.0f  // bottom-left
-        };
-		// clang-format on
-
-		glGenVertexArrays(1, &g_cubeVAO);
-		glGenBuffers(1, &g_cubeVBO);
-		// fill buffer
-		glBindBuffer(GL_ARRAY_BUFFER, g_cubeVBO);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-		// link vertex attributes
-		glBindVertexArray(g_cubeVAO);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)0);
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)(3 * sizeof(f32)));
-		glEnableVertexAttribArray(2);
-		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(f32), (void*)(6 * sizeof(f32)));
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-		glBindVertexArray(0);
-	}
-	// render Cube
-	glBindVertexArray(g_cubeVAO);
-	glDrawArrays(GL_TRIANGLES, 0, 36);
-	glBindVertexArray(0);
 }
 
 void APIENTRY DebugOutput(GLenum source, GLenum type, u32 id, GLenum severity, GLsizei length, const char* message, const void* userParam)
