@@ -398,7 +398,7 @@ void main()
     color *= GetAmbientOcclusion();
 
     // tonemapping
-    // color = color / (color + 1.0);
+    color = color / (color + 1.0);
     // gamma
     color = pow(color, vec3(1.0 / 2.2));
 
