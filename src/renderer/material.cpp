@@ -103,12 +103,12 @@ void Material::Bind(Program* program, const Environment* env)
 	++index;
 }
 
-Program* Material::GetProgram()
+Program* Material::GetProgram() const
 {
 	return Program::MakeRender(GetUniqueName().c_str(), m_baseVS.c_str(), m_baseFS.c_str(), GetDefines());
 }
 
-std::vector<std::string> Material::GetDefines()
+std::vector<std::string> Material::GetDefines() const
 {
 	std::vector<std::string> defines;
 
@@ -148,7 +148,7 @@ std::vector<std::string> Material::GetDefines()
 	return defines;
 }
 
-std::string Material::GetUniqueName()
+std::string Material::GetUniqueName() const
 {
-	return std::string(m_name) + "_" + std::to_string(GetMask());
+	return m_name + "_" + std::to_string(GetMask());
 }

@@ -11,7 +11,8 @@ add_executable(viewer
     src/renderer/program.h src/renderer/program.cpp
     src/renderer/material.h src/renderer/material.cpp
     src/renderer/environment.h src/renderer/environment.cpp
-    src/renderer/render_primitives.h src/renderer/render_primitives.cpp)
+    src/renderer/render_primitives.h src/renderer/render_primitives.cpp
+    src/renderer/renderer.h src/renderer/renderer.cpp)
 
 target_link_libraries(viewer PRIVATE glm glfw glad stb imgui assimp)
 target_include_directories(viewer PRIVATE src)

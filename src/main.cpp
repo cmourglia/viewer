@@ -4,6 +4,7 @@
 #include "renderer/material.h"
 #include "renderer/environment.h"
 #include "renderer/render_primitives.h"
+#include "renderer/renderer.h"
 
 #include <glad/glad.h>
 #include <glfw/glfw3.h>
@@ -34,8 +35,6 @@
 
 #include <stdio.h>
 
-extern std::vector<glm::vec3> PrecomputeDFG(u32 w, u32 h, u32 sampleCount); // 128, 128, 512
-
 static void MouseButtonCallback(GLFWwindow* window, i32 button, i32 action, i32 mods);
 static void MouseMoveCallback(GLFWwindow* window, f64 x, f64 y);
 static void KeyCallback(GLFWwindow* window, i32 key, i32 scancode, i32 action, i32 mods);
@@ -44,8 +43,6 @@ static void WheelCallback(GLFWwindow* window, f64 x, f64 y);
 static void FramebufferSizeCallback(GLFWwindow* window, i32 width, i32 height);
 
 static void DropCallback(GLFWwindow* window, i32 count, const char** paths);
-
-void RenderCube();
 
 void DebugOutput(GLenum source, GLenum type, u32 id, GLenum severity, GLsizei length, const char* message, const void* userParam);
 
@@ -64,13 +61,6 @@ std::string GetFileExtension(const std::string& filename)
 {
 	return filename.substr(filename.find_last_of(".") + 1);
 }
-
-struct Vertex
-{
-	glm::vec3 position;
-	glm::vec3 normal;
-	glm::vec2 texcoord;
-};
 
 struct Camera
 {
@@ -154,339 +144,12 @@ GLuint LoadTexture(const std::string& filename)
 	return texture;
 }
 
-struct RenderContext
-{
-	glm::vec3 eyePosition;
-	glm::mat4 model, view, proj;
-
-	glm::vec3 lightDirection;
-
-	Environment* env;
-};
-
-void SetupShader(RenderContext* context, Material* material)
-{
-	Program* program = material->GetProgram();
-
-	program->Bind();
-
-	program->SetUniform("u_eye", context->eyePosition);
-	program->SetUniform("u_model", context->model);
-	program->SetUniform("u_view", context->view);
-	program->SetUniform("u_proj", context->proj);
-
-	material->Bind(program, context->env);
-}
-
-enum DataType
-{
-	DataType_Byte          = GL_BYTE,
-	DataType_UnsignedByte  = GL_UNSIGNED_BYTE,
-	DataType_Short         = GL_SHORT,
-	DataType_UnsignedShort = GL_UNSIGNED_SHORT,
-	DataType_Int           = GL_INT,
-	DataType_UnsignedInt   = GL_UNSIGNED_INT,
-	DataType_HalfFloat     = GL_HALF_FLOAT,
-	DataType_Float         = GL_FLOAT,
-};
-
-enum ElementType
-{
-	ElementType_Scalar = 1,
-	ElementType_Vec2   = 2,
-	ElementType_Vec3   = 3,
-	ElementType_Vec4   = 4,
-};
-
-enum BindingPoint
-{
-	BindingPoint_Position  = 0,
-	BindingPoint_Normal    = 1,
-	BindingPoint_Tangent   = 2,
-	BindingPoint_Texcoord0 = 3,
-	BindingPoint_Texcoord1 = 4,
-	BindingPoint_Texcoord2 = 5,
-	BindingPoint_Texcoord3 = 6,
-	BindingPoint_Texcoord4 = 7,
-	BindingPoint_Color     = 8,
-	BindingPoint_Joints    = 9,
-	BindingPoint_Weights   = 10,
-	BindingPoint_Custom0   = 11,
-	BindingPoint_Custom1   = 12,
-	BindingPoint_Custom2   = 13,
-	BindingPoint_Custom3   = 14,
-};
-
-struct LayoutItem
-{
-	BindingPoint   bindingPoint;
-	DataType       dataType;
-	ElementType    elementType;
-	GLsizeiptr     offset;
-	GLsizeiptr     dataSize;
-	const GLubyte* data;
-
-	GLsizeiptr GetSize() const
-	{
-		GLsizeiptr dataSize = 0;
-
-		switch (dataType)
-		{
-			case DataType_Byte:
-			case DataType_UnsignedByte:
-				assert(sizeof(GLbyte) == sizeof(GLubyte));
-				dataSize = sizeof(GLbyte);
-				break;
-
-			case DataType_Short:
-			case DataType_UnsignedShort:
-			case DataType_HalfFloat:
-				assert(sizeof(GLshort) == sizeof(GLushort));
-				assert(sizeof(GLshort) == sizeof(GLhalf));
-				dataSize = sizeof(GLshort);
-				break;
-
-			case DataType_Int:
-			case DataType_UnsignedInt:
-			case DataType_Float:
-				assert(sizeof(GLint) == sizeof(GLuint));
-				assert(sizeof(GLint) == sizeof(GLfloat));
-				dataSize = sizeof(GLint);
-				break;
-		}
-
-		return dataSize * (GLsizeiptr)elementType;
-	}
-};
-
-using Layout = std::vector<LayoutItem>;
-
-struct VertexDataInfos
-{
-	Layout     layout;
-	GLuint     byteStride;
-	GLsizeiptr bufferSize;
-	bool       interleaved;
-	bool       singleBuffer;
-};
-
-struct IndexDataInfos
-{
-	GLsizeiptr     bufferSize;
-	GLuint         indexCount;
-	GLenum         indexType;
-	const GLubyte* data;
-};
-
-struct Mesh
-{
-	GLuint  vao, buffer;
-	GLsizei indexCount;
-	GLenum  indexType;
-
-	Mesh()
-	{
-	}
-
-	Mesh(const std::vector<Vertex>& vertices, const std::vector<GLushort>& indices)
-	    : indexType(GL_UNSIGNED_SHORT)
-	    , indexCount(indices.size())
-	{
-		SetData(vertices, indices);
-	}
-
-	Mesh(const std::vector<Vertex>& vertices, const std::vector<GLuint>& indices)
-	    : indexType(GL_UNSIGNED_INT)
-	    , indexCount(indices.size())
-	{
-		SetData(vertices, indices);
-	}
-
-	Mesh(const VertexDataInfos& vertexDataInfos, const IndexDataInfos& indexDataInfos)
-	    : indexCount(indexDataInfos.indexCount)
-	    , indexType(indexDataInfos.indexType)
-	{
-		GLint alignment = GL_NONE;
-		glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &alignment);
-
-		glCreateVertexArrays(1, &vao);
-
-		const GLsizeiptr alignedIndexSize = AlignedSize(indexDataInfos.bufferSize, alignment);
-
-		GLsizeiptr alignedVertexSize = 0;
-
-		if (vertexDataInfos.singleBuffer)
-		{
-			alignedVertexSize = AlignedSize(vertexDataInfos.bufferSize, alignment);
-		}
-		else
-		{
-			for (const auto& entry : vertexDataInfos.layout)
-			{
-				alignedVertexSize += AlignedSize(entry.dataSize, alignment);
-			}
-		}
-
-		glCreateBuffers(1, &buffer);
-		glNamedBufferStorage(buffer, alignedIndexSize + alignedVertexSize, nullptr, GL_DYNAMIC_STORAGE_BIT);
-
-		glNamedBufferSubData(buffer, 0, indexDataInfos.bufferSize, indexDataInfos.data);
-		glVertexArrayElementBuffer(vao, buffer);
-
-		if (vertexDataInfos.singleBuffer)
-		{
-			i32        vboIndex   = 0;
-			GLsizeiptr vboBasePtr = alignedIndexSize;
-
-			const GLubyte* data = vertexDataInfos.layout[0].data;
-			glNamedBufferSubData(buffer, vboBasePtr, vertexDataInfos.bufferSize, data);
-
-			for (const auto& entry : vertexDataInfos.layout)
-			{
-				assert(entry.data == data);
-
-				glEnableVertexArrayAttrib(vao, entry.bindingPoint);
-				glVertexArrayAttribBinding(vao, entry.bindingPoint, vboIndex);
-
-				if (vertexDataInfos.interleaved)
-				{
-					glVertexArrayVertexBuffer(vao, vboIndex, buffer, vboBasePtr, vertexDataInfos.byteStride);
-					glVertexArrayAttribFormat(vao, entry.bindingPoint, entry.elementType, entry.dataType, GL_FALSE, entry.offset);
-				}
-				else
-				{
-					vboBasePtr += entry.offset;
-
-					glVertexArrayVertexBuffer(vao, vboIndex, buffer, vboBasePtr, entry.GetSize());
-					glVertexArrayAttribFormat(vao, entry.bindingPoint, entry.elementType, entry.dataType, GL_FALSE, 0);
-
-					++vboIndex;
-				}
-			}
-		}
-		else
-		{
-			i32        vboIndex   = 0;
-			GLsizeiptr vboBasePtr = alignedIndexSize;
-
-			std::unordered_map<const GLubyte*, GLsizeiptr> insertedData;
-
-			for (const auto& entry : vertexDataInfos.layout)
-			{
-				if (insertedData.find(entry.data) == insertedData.end())
-				{
-					glNamedBufferSubData(buffer, vboBasePtr, entry.dataSize, entry.data);
-
-					glVertexArrayVertexBuffer(vao, vboIndex, buffer, vboBasePtr, entry.GetSize());
-
-					insertedData[entry.data] = vboBasePtr;
-
-					vboBasePtr += AlignedSize(entry.dataSize, alignment);
-				}
-				else
-				{
-					glVertexArrayVertexBuffer(vao, vboIndex, buffer, insertedData[entry.data] + entry.offset, entry.GetSize());
-				}
-
-				glVertexArrayAttribFormat(vao, entry.bindingPoint, entry.elementType, entry.dataType, GL_FALSE, 0);
-				glEnableVertexArrayAttrib(vao, entry.bindingPoint);
-				glVertexArrayAttribBinding(vao, entry.bindingPoint, vboIndex);
-
-				++vboIndex;
-			}
-		}
-	}
-
-	static GLsizeiptr AlignedSize(GLsizeiptr size, GLsizeiptr align)
-	{
-		if (size % align == 0)
-			return size;
-		return size + (align - size % align);
-	}
-
-	void SetLayout(const Layout& layout, const std::vector<GLsizeiptr>& offsets)
-	{
-		assert(offsets.size() == layout.size());
-		for (size_t i = 0; i < layout.size(); ++i)
-		{
-			const auto& entry = layout[i];
-			glEnableVertexArrayAttrib(vao, entry.bindingPoint);
-			glVertexArrayAttribFormat(vao, entry.bindingPoint, entry.elementType, entry.dataType, GL_FALSE, offsets[i]);
-			glVertexArrayAttribBinding(vao, entry.bindingPoint, 0);
-		}
-	}
-
-	template <typename IndexType>
-	void SetData(const std::vector<Vertex>& vertices, const std::vector<IndexType>& indices)
-	{
-		GLint alignment = GL_NONE;
-		glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &alignment);
-
-		glCreateVertexArrays(1, &vao);
-
-		const GLsizeiptr indexSize        = indices.size() * sizeof(IndexType);
-		const GLsizeiptr alignedIndexSize = AlignedSize(indexSize, alignment);
-
-		const GLsizeiptr vertexSize        = vertices.size() * sizeof(Vertex);
-		const GLsizeiptr alignedVertexSize = AlignedSize(vertexSize, alignment);
-
-		glCreateBuffers(1, &buffer);
-		glNamedBufferStorage(buffer, alignedIndexSize + alignedVertexSize, nullptr, GL_DYNAMIC_STORAGE_BIT);
-
-		glNamedBufferSubData(buffer, 0, indexSize, indices.data());
-		glNamedBufferSubData(buffer, alignedIndexSize, vertexSize, vertices.data());
-
-		glVertexArrayVertexBuffer(vao, 0, buffer, alignedIndexSize, sizeof(Vertex));
-		glVertexArrayElementBuffer(vao, buffer);
-
-		static const Layout layout = {{BindingPoint_Position, DataType_Float, ElementType_Vec3},
-		                              {BindingPoint_Normal, DataType_Float, ElementType_Vec3},
-		                              {BindingPoint_Texcoord0, DataType_Float, ElementType_Vec2}};
-
-		SetLayout(layout, {offsetof(Vertex, position), offsetof(Vertex, normal), offsetof(Vertex, texcoord)});
-	}
-
-	void Draw()
-	{
-		glBindVertexArray(vao);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer);
-		glDrawElements(GL_TRIANGLES, indexCount, indexType, nullptr);
-	}
-};
-
-struct Model
-{
-	Material* material;
-	Mesh*     mesh;
-
-	glm::mat4 worldTransform;
-
-	void Draw(RenderContext* context)
-	{
-		context->model = worldTransform;
-		SetupShader(context, material);
-		mesh->Draw();
-	}
-};
-
 static Camera g_camera;
 
 void SetupUI(GLFWwindow* window);
-void RenderUI(std::vector<Model>* models);
+void RenderUI(const std::vector<Model>& models);
 
 f32 g_lastScroll = 0.0f;
-
-GLuint Render(std::vector<Model>* models, const glm::vec2& size, Environment* env);
-
-GLuint fbos[2];
-GLuint rts[3];
-
-#define msaaFramebuffer fbos[0]
-#define resolveFramebuffer fbos[1]
-
-GLuint msaaRenderTexture;
-GLuint msaaDepthRenderBuffer;
-GLuint resolveTexture;
 
 f64 g_viewportX = 0.0, g_viewportY = 0.0;
 f64 g_viewportW = 0.0, g_viewportH = 0.0;
@@ -671,7 +334,7 @@ static Mesh     g_cubeMesh;
 glm::vec3 g_lightDirection    = glm::vec3(0, -1, 0);
 bool      g_showIrradianceMap = false;
 
-Environment g_env;
+Environment* g_env;
 
 i32 main()
 {
@@ -697,7 +360,7 @@ i32 main()
 	glfwSetDropCallback(window, DropCallback);
 
 	glfwMakeContextCurrent(window);
-	glfwSwapInterval(0);
+	glfwSwapInterval(1);
 
 	glfwGetFramebufferSize(window, &g_width, &g_height);
 
@@ -715,30 +378,14 @@ i32 main()
 
 	SetupUI(window);
 
-	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+	Renderer renderer;
+	renderer.Initialize(glm::vec2(g_width, g_height));
+	g_env = renderer.GetEnvironment();
 
-	Program::MakeRender("equirectangularToCubemap", "resources/shaders/cubemap.vert", "resources/shaders/equirectangularToCubemap.frag");
-	Program::MakeRender("prefilterEnvmap", "resources/shaders/cubemap.vert", "resources/shaders/prefilter.frag");
-	Program::MakeRender("irradiance", "resources/shaders/cubemap.vert", "resources/shaders/irradiance.frag");
-	g_backgroundProgram = Program::MakeRender("background", "resources/shaders/background.vert", "resources/shaders/background.frag");
-
-	glCreateTextures(GL_TEXTURE_2D, 1, &g_env.iblDFG);
-
-	const i32 levels = 1;
-
-	// glTextureStorage2D(equirectangularTexture, levels, GL_RGB32F, w, h);
-	glTextureStorage2D(g_env.iblDFG, 1, GL_RGB32F, 128, 128);
-	// glTextureSubImage2D(g_env.iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1).data());
-	glTextureSubImage2D(g_env.iblDFG, 0, 0, 0, 128, 128, GL_RGB, GL_FLOAT, PrecomputeDFG(128, 128, 1024).data());
-	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTextureParameteri(g_env.iblDFG, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr", &g_env);
+	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr", g_env);
 
 	// LoadScene("external/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf");
-	// LoadScene(R"(W:\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
+	LoadScene(R"(W:\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
 
 	ImGui::FileBrowser textureDialog;
 	textureDialog.SetTitle("Open texture...");
@@ -828,18 +475,26 @@ i32 main()
 			g_viewportW = vMax.x - vMin.x;
 			g_viewportH = vMax.y - vMin.y;
 
-			const glm::vec2 size(g_viewportW, g_viewportH);
+			static glm::vec2 lastSize(0, 0);
+			const glm::vec2  size(g_viewportW, g_viewportH);
+
+			if (size != lastSize)
+			{
+				renderer.Resize(size);
+				lastSize = size;
+			}
+
+			CameraInfos cameraInfos = {
+			    .view     = g_camera.GetView(),
+			    .proj     = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.001f, 100.0f),
+			    .position = g_camera.position,
+			};
 
 			ImTextureID id;
 			switch (g_renderMode)
 			{
-				case RenderMode_IBL_DFG:
-					id = (void*)(intptr_t)g_env.iblDFG;
-					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 0), ImVec2(1, 1));
-					break;
-				case RenderMode_Default:
 				default:
-					id = (void*)(intptr_t)Render(&g_models, size, &g_env);
+					id = (void*)(intptr_t)renderer.Render(cameraInfos, g_models);
 					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
 			}
 			// ImTextureID
@@ -1002,6 +657,14 @@ static void KeyCallback(GLFWwindow* window, i32 key, i32 scancode, i32 action, i
 	{
 		g_renderMode = (g_renderMode + 1) % RenderMode_Count;
 	}
+
+	if (key == GLFW_KEY_F2 && action == GLFW_RELEASE)
+	{
+		static int swapInterval = 1;
+		swapInterval ^= 1;
+
+		glfwSwapInterval(swapInterval);
+	}
 }
 
 static void WheelCallback(GLFWwindow* window, f64 x, f64 y)
@@ -1053,110 +716,6 @@ void SetupUI(GLFWwindow* window)
 	ImGui_ImplOpenGL3_Init("#version 450");
 }
 
-GLuint Render(std::vector<Model>* models, const glm::vec2& size, Environment* env)
-{
-	static auto lastSize = glm::vec2(0, 0);
-
-	// FIXME: Be smart about this
-	if (!glIsFramebuffer(msaaFramebuffer))
-	{
-		glCreateFramebuffers(2, fbos);
-	}
-
-	if (lastSize != size)
-	{
-		if (glIsTexture(msaaRenderTexture))
-		{
-			glDeleteTextures(1, &msaaRenderTexture);
-			glDeleteTextures(1, &resolveTexture);
-			glDeleteRenderbuffers(1, &msaaDepthRenderBuffer);
-		}
-
-		// Create MSAA texture and attach it to FBO
-		glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE, 1, &msaaRenderTexture);
-		glTextureStorage2DMultisample(msaaRenderTexture, 4, GL_RGB8, size.x, size.y, GL_TRUE);
-		glNamedFramebufferTexture(msaaFramebuffer, GL_COLOR_ATTACHMENT0, msaaRenderTexture, 0);
-
-		// Create MSAA DS rendertarget and attach it to FBO
-		glCreateRenderbuffers(1, &msaaDepthRenderBuffer);
-		glNamedRenderbufferStorageMultisample(msaaDepthRenderBuffer, 4, GL_DEPTH24_STENCIL8, size.x, size.y);
-		glNamedFramebufferRenderbuffer(msaaFramebuffer, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msaaDepthRenderBuffer);
-
-		if (glCheckNamedFramebufferStatus(msaaFramebuffer, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		{
-			fprintf(stderr, "MSAA framebuffer incomplete\n");
-		}
-
-		glCreateTextures(GL_TEXTURE_2D, 1, &resolveTexture);
-		glTextureStorage2D(resolveTexture, 1, GL_RGB8, size.x, size.y);
-		glNamedFramebufferTexture(resolveFramebuffer, GL_COLOR_ATTACHMENT0, resolveTexture, 0);
-
-		if (glCheckNamedFramebufferStatus(resolveFramebuffer, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		{
-			fprintf(stderr, "Resolve framebuffer incomplete\n");
-		}
-
-		lastSize = size;
-	}
-
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, msaaFramebuffer);
-
-	glViewport(0, 0, size.x, size.y);
-
-	glClearDepth(1.0f);
-	glClearColor(0.1f, 0.6f, 0.4f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_LEQUAL);
-
-	RenderContext context = {
-	    .eyePosition = g_camera.position,
-	    .view        = g_camera.GetView(),
-	    .proj        = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.001f, 100.0f),
-	    .env         = env,
-	};
-
-	// static GLuint g_irradianceMap;
-	// static GLuint g_radianceMap;
-	// static GLuint g_envCubeMap;
-	// static GLuint g_iblDFG;
-
-	for (auto&& model : *models)
-	{
-		model.Draw(&context);
-	}
-
-	g_backgroundProgram->Bind();
-	g_backgroundProgram->SetUniform("envmap", 0);
-	g_backgroundProgram->SetUniform("view", context.view);
-	g_backgroundProgram->SetUniform("proj", context.proj);
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? env->radianceMap : env->envMap);
-	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_showIrradianceMap ? g_irradianceMap : g_envCubeMap);
-	// glBindTexture(GL_TEXTURE_CUBE_MAP, g_envCubeMap);
-	RenderCube();
-
-	glDisable(GL_DEPTH_TEST);
-
-	glBlitNamedFramebuffer(msaaFramebuffer,
-	                       resolveFramebuffer,
-	                       0,
-	                       0,
-	                       size.x,
-	                       size.y,
-	                       0,
-	                       0,
-	                       size.x,
-	                       size.y,
-	                       GL_COLOR_BUFFER_BIT,
-	                       GL_NEAREST);
-
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-	return resolveTexture;
-}
-
 static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 {
 	for (i32 i = 0; i < count; ++i)
@@ -1164,7 +723,7 @@ static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 		std::string ext = GetFileExtension(paths[i]);
 		if (ext == "hdr")
 		{
-			LoadEnvironment(paths[i], &g_env);
+			LoadEnvironment(paths[i], g_env);
 		}
 		else
 		{

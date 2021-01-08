@@ -13,11 +13,11 @@ struct Material
 
 	u32      GetMask() const;
 	void     Bind(Program* program, const Environment* env);
-	Program* GetProgram();
+	Program* GetProgram() const;
 
 private:
-	std::vector<std::string> GetDefines();
-	std::string                   GetUniqueName();
+	std::vector<std::string> GetDefines() const;
+	std::string              GetUniqueName() const;
 
 private:
 	std::string m_name;
