@@ -10,12 +10,12 @@
 [submodule "external/tinygltf"]
 	path = external/tinygltf
 	url = https://github.com/syoyo/tinygltf.git
-[submodule "external/imgui"]
-	path = external/imgui
-	url = https://github.com/ocornut/imgui
 [submodule "external/glTF-Sample-Models"]
 	path = external/glTF-Sample-Models
 	url = https://github.com/KhronosGroup/glTF-Sample-Models
 [submodule "external/assimp"]
 	path = external/assimp
 	url = https://github.com/assimp/assimp.git
+[submodule "external/imgui"]
+	path = external/imgui
+	url = https://github.com/ocornut/imgui
