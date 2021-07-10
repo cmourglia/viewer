@@ -263,6 +263,8 @@ void Program::Build()
 
 void Program::GetUniformInfos()
 {
+	m_uniforms.clear();
+
 	GLint uniformCount = 0;
 	glGetProgramiv(m_id, GL_ACTIVE_UNIFORMS, &uniformCount);
 

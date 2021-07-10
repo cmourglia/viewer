@@ -219,31 +219,45 @@ Material* ProcessMaterial(aiMaterial* inputMaterial, const aiScene* scene, const
 	Material* material = new Material(inputMaterial->GetName().C_Str(), "resources/shaders/pbr.vert", "resources/shaders/pbr.frag");
 
 	aiColor3D albedo;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_BASE_COLOR_FACTOR, albedo))
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_BASE_COLOR, albedo))
 	{
 		material->hasAlbedo = true;
 		material->albedo    = glm::vec3(albedo.r, albedo.g, albedo.b);
 	}
 
 	f32 metallic;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLIC_FACTOR, metallic))
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_METALLIC_FACTOR, metallic))
 	{
 		material->hasMetallic = true;
 		material->metallic    = metallic;
 	}
 
 	f32 roughness;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_ROUGHNESS_FACTOR, roughness))
+	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness))
 	{
 		material->hasRoughness = true;
 		material->roughness    = roughness;
 	}
 
 	aiString albedoTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_BASE_COLOR_TEXTURE, &albedoTexture))
+	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_BASE_COLOR_TEXTURE, &albedoTexture))
 	{
 		material->hasAlbedoTexture = true;
 		material->albedoTexture    = LoadTexture(TexturePath(albedoTexture.C_Str(), path));
+	}
+
+	aiString metallicTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_METALLIC_TEXTURE, &metallicTexture))
+	{
+		material->hasMetallicTexture = true;
+		material->metallicTexture    = LoadTexture(TexturePath(metallicTexture.C_Str(), path));
+	}
+
+	aiString roughnessTexture;
+	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_ROUGHNESS_TEXTURE, &roughnessTexture))
+	{
+		material->hasRoughnessTexture = true;
+		material->roughnessTexture    = LoadTexture(TexturePath(roughnessTexture.C_Str(), path));
 	}
 
 	aiString metallicRoughnessTexture;
@@ -406,8 +420,8 @@ i32 main()
 		// because it would be confusing to have two docking targets within each others.
 		ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
 		ImGuiViewport*   viewport     = ImGui::GetMainViewport();
-		ImGui::SetNextWindowPos(viewport->GetWorkPos());
-		ImGui::SetNextWindowSize(viewport->GetWorkSize());
+		ImGui::SetNextWindowPos(viewport->WorkPos);
+		ImGui::SetNextWindowSize(viewport->WorkSize);
 		ImGui::SetNextWindowViewport(viewport->ID);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);

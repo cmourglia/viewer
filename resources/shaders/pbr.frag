@@ -111,7 +111,6 @@ vec2 GetMetallicRoughness()
     result *= texture(s_metallicRoughness, in_texcoord).bg;
 #endif
 
-    // return result;
     return result;
 }
 
@@ -250,7 +249,7 @@ float Pow5(float x)
 
 float saturate(float x)
 {
-    return clamp(x, 0, 1);
+    return clamp(x, 0.0, 1.0);
 }
 
 vec3 F_Schlick(vec3 f0, float VoH)
@@ -330,7 +329,7 @@ void GetPixelParams(inout PixelParams params, float NoV)
 
     params.metallic = metallicRoughness.x; // Useful ?
     params.reflectance = 0.04;
-    params.perceptualRoughness = clamp(metallicRoughness.y, MIN_PERCEPTUAL_ROUGHNESS, 1);
+    params.perceptualRoughness = clamp(metallicRoughness.y, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
     params.roughness = params.perceptualRoughness * params.perceptualRoughness;
     params.diffuseColor = albedo * (1.0 - metallicRoughness.x);
     params.f0 = albedo * params.metallic + (params.reflectance * (1.0 - params.metallic));
@@ -345,15 +344,11 @@ vec3 EvaluateIBL(in vec3 n, in vec3 v, in PixelParams params)
     vec3 E = SpecularDFG(params);
     vec3 r = reflect(-v, n);
     vec3 specularIndirect = textureLod(s_radianceMap, r, params.perceptualRoughness * 8.0).rgb;
-    // vec3 specularIndirect = textureLod(s_radianceMap, r, 0).rgb;
     vec3 Fr = specularIndirect * E;
 
     // diffuse layer
     vec3 diffuseIrradiance = texture(s_irradianceMap, n).rgb;
     vec3 Fd = params.diffuseColor * diffuseIrradiance * (1.0 - E);
-
-    // return Fr;
-    // return Fd;
 
     return Fr + Fd;
 }

@@ -116,6 +116,14 @@ std::vector<std::string> Material::GetDefines() const
 	{
 		defines.push_back("HAS_ALBEDO_TEXTURE");
 	}
+	if (hasRoughness)
+	{
+		defines.push_back("HAS_ROUGHNESS");
+	}
+	if (hasMetallic)
+	{
+		defines.push_back("HAS_METALLIC");
+	}
 	if (hasRoughnessTexture)
 	{
 		defines.push_back("HAS_ROUGHNESS_TEXTURE");
