@@ -9,14 +9,14 @@
 
 struct Material
 {
-	Material(const std::string& matName, const std::string& baseVS, const std::string& baseFS);
+	Material(const char* matName, const char* baseVS, const char* baseFS);
 
 	u32      GetMask() const;
 	void     Bind(Program* program, const Environment* env);
 	Program* GetProgram() const;
 
 private:
-	std::vector<std::string> GetDefines() const;
+	std::vector<const char*> GetDefines() const;
 	std::string              GetUniqueName() const;
 
 private:
@@ -25,10 +25,11 @@ private:
 	std::string m_baseFS;
 
 public:
-	glm::vec3 albedo;
-	f32       roughness;
-	f32       metallic;
-	glm::vec3 emissive;
+	glm::vec3 albedo         = glm::vec3(0.5f, 0.5f, 0.5f);
+	f32       roughness      = 0.0f;
+	f32       metallic       = 0.0f;
+	glm::vec3 emissive       = glm::vec3(0.0f, 0.0f, 0.0f);
+	f32       emissiveFactor = 1.0f;
 
 	GLuint albedoTexture            = 0;
 	GLuint roughnessTexture         = 0;
@@ -51,9 +52,5 @@ public:
 	bool hasAmbientOcclusionMap      = false;
 
 private:
-	bool m_padding0;
-	bool m_padding1;
-	bool m_padding2;
-	bool m_padding3;
-	bool m_padding4;
+	i32 m_padding : 5;
 };

@@ -40,6 +40,7 @@ foreach(BUILD ${DISABLED_ASSIMP_BUILDS})
 endforeach()
 
 if(MSVC)
-    add_compile_options(/Wv:18)
+    # add_compile_options(/Wv:18)
 endif()
 add_subdirectory(assimp)
+target_compile_options(assimp PRIVATE -Wno-deprecated-array-compare)

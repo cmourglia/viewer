@@ -45,6 +45,10 @@ uniform sampler2D s_metallicRoughness;
 uniform sampler2D s_emissive;
 #endif
 
+#if defined(HAS_EMISSIVE) || defined(HAS_EMISSIVE_TEXTURE)
+uniform float u_emissiveFactor;
+#endif
+
 #ifdef HAS_NORMAL_MAP
 uniform sampler2D s_normal;
 #endif
@@ -57,23 +61,20 @@ uniform samplerCube s_irradianceMap;
 uniform samplerCube s_radianceMap;
 uniform sampler2D s_iblDFG;
 
-#define PI 3.14159265359
-#define INV_PI 0.31830988618
 #define MIN_PERCEPTUAL_ROUGHNESS 0.045
+
+#include "math_utils.glsl"
+#include "pbr_utils.glsl"
 
 vec3 GetAlbedo() {
     vec3 result = vec3(0.0);
 
-#ifdef HAS_ALBEDO_TEXTURE
-#   ifdef HAS_ALBEDO
+#if defined(HAS_ALBEDO_TEXTURE) && defined(HAS_ALBEDO)
     result = u_albedo * pow(texture(s_albedo, in_texcoord).rgb, vec3(2.2));
-#   else
-    result = texture(s_albedo, in_texcoord).rgb;
-#   endif
-#else
-#   ifdef HAS_ALBEDO
+#elif defined(HAS_ALBEDO_TEXTURE)
+    result = pow(texture(s_albedo, in_texcoord).rgb, vec3(2.2));
+#elif defined(HAS_ALBEDO)
     result = u_albedo;
-#   endif
 #endif
 
     return result;
@@ -119,7 +120,7 @@ vec3 GetEmissive() {
 
 #ifdef HAS_EMISSIVE_TEXTURE
 #   ifdef HAS_EMISSIVE
-    result = u_emissive * pow(texture(s_emissive, in_texcoord).rgb, vec3(2.2));
+    result = u_emissive * texture(s_emissive, in_texcoord).rgb;
 #   else
     result = texture(s_emissive, in_texcoord).rgb;
 #   endif
@@ -127,6 +128,10 @@ vec3 GetEmissive() {
 #   ifdef HAS_EMISSIVE
     result = u_emissive;
 #   endif
+#endif
+
+#if defined(HAS_EMISSIVE_TEXTURE) || defined(HAS_EMISSIVE)
+    result *= u_emissiveFactor;
 #endif
 
     return result;
@@ -240,44 +245,6 @@ float GetDielectricF0(float reflectance)
     return 0.16 * reflectance * reflectance;
 }
 
-// Utils
-float Pow5(float x)
-{
-    const float x2 = x * x;
-    return x2 * x2 * x;
-}
-
-float saturate(float x)
-{
-    return clamp(x, 0.0, 1.0);
-}
-
-vec3 F_Schlick(vec3 f0, float VoH)
-{
-    return f0 + (1 - f0) * pow(1 - VoH, 5.0);
-}
-
-float D_GGX(float a, float NoH)
-{
-    float a2 = a * a;
-    float f = (NoH * a2 - NoH) * NoH + 1.0;
-    return a2 / (PI * f * f);
-}
-
-// Appoximation of joint Smith term for GGX
-// [Heitz 2014, "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"]
-float Vis_SmithJointApprox(float a, float NoV, float NoL)
-{
-    float V_SmithV = NoL * (NoV * (1 - a) + a);
-    float V_SmithL = NoV * (NoL * (1 - a) + a);
-    return 0.5 / (V_SmithL + V_SmithV);
-}
-
-float Fd_Lambert()
-{
-    return INV_PI;
-}
-
 struct PixelParams
 {
     vec3 diffuseColor;
@@ -289,33 +256,6 @@ struct PixelParams
     vec3 dfg;
     vec3 energyCompensation;
 };
-
-vec3 EnvDFGPolynomial(vec3 f0, float roughness, float NoV)
-{
-    float x = 1 - roughness;
-    float y = NoV;
-
-    float b1 = -0.1688;
-    float b2 = 1.895;
-    float b3 = 0.9903;
-    float b4 = -4.853;
-    float b5 = 8.404;
-    float b6 = -5.069;
-    float bias = saturate(min(b1 * x + b2 * x * x, b3 + b4 * y + b5 * y * y + b6 * y * y * y));
-
-    float d0 = 0.6045;
-    float d1 = 1.699;
-    float d2 = -0.5228;
-    float d3 = -3.603;
-    float d4 = 1.404;
-    float d5 = 0.1939;
-    float d6 = 2.661;
-    float delta = saturate(d0 + d1 * x + d2 * y + d3 * x * x + d4 * x * y + d5 * y * y + d6 * x * x * x);
-    float scale = delta - bias;
-
-    bias *= saturate(50.0 * f0.y);
-    return f0 * scale + bias;
-}
 
 vec3 SpecularDFG(const PixelParams params)
 {
@@ -375,7 +315,7 @@ vec3 EvaluateDirectLighting(in vec3 n, in vec3 v, in PixelParams params)
 {
     vec3 Lo = vec3(0.0);
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 0; ++i)
     {
         vec3 lightVec = GetLightPos(i) - GetFragPos();
 
@@ -383,7 +323,7 @@ vec3 EvaluateDirectLighting(in vec3 n, in vec3 v, in PixelParams params)
 
         float attenuation = 1.0 / dot(lightVec, lightVec);
 
-        vec3 illuminance = GetLightColor(i) * saturate(dot(n, l)) * attenuation;
+        vec3 illuminance = GetLightColor(i) * 0.01 * saturate(dot(n, l)) * attenuation;
         vec3 luminance = BRDF(n, v, l, params) * illuminance;
 
         Lo += luminance;
@@ -391,7 +331,6 @@ vec3 EvaluateDirectLighting(in vec3 n, in vec3 v, in PixelParams params)
 
     return Lo;
 }
-
 
 vec3 tonemap_Uchimura(vec3 x, float P, float a, float m, float l, float c, float b) {
     // Uchimura 2017, "HDR theory and practice"
@@ -452,11 +391,6 @@ void main()
 
     vec3 color = EvaluateIBL(n, v, params) + EvaluateDirectLighting(n, v, params) + GetEmissive();
     color *= GetAmbientOcclusion();
-    // color = EvaluateDirectLighting(n, v, params);
-    // color = EvaluateIBL(n, v, params);
-
-    color = tonemap_Uchimura(color);
-    color = gamma(color);
 
     out_color = vec4(color, 1.0);
 }

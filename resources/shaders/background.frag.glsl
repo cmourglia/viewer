@@ -2,6 +2,7 @@ layout (location = 0) in vec3 in_position;
 layout (location = 0) out vec4 out_color;
 
 uniform samplerCube envmap;
+uniform int miplevel;
 
 vec3 tonemap_Uchimura(vec3 x, float P, float a, float m, float l, float c, float b) {
     // Uchimura 2017, "HDR theory and practice"
@@ -52,10 +53,10 @@ vec3 gamma(vec3 v) {
 
 void main()
 {
-    vec3 color = texture(envmap, in_position).rgb;
+    vec3 color = textureLod(envmap, in_position, miplevel).rgb;
 
-    color = tonemap_Uchimura(color);
-    color = gamma(color);
+    // color = tonemap_Uchimura(color);
+    // color = gamma(color);
 
     // color = vec3(0);
     out_color = vec4(color, 1.0);

@@ -3,6 +3,7 @@
 #include "defines.h"
 
 #include <glm/vec2.hpp>
+#include <chrono>
 
 constexpr f32 Pi        = 3.14159265359f;
 constexpr f32 Tau       = 2.0f * Pi;
@@ -64,3 +65,27 @@ constexpr inline f32 Pow(const f32 x)
 
 	return res;
 }
+
+struct Timer
+{
+	Timer()
+	{
+		start = Clock::now();
+	}
+
+	f64 Tick()
+	{
+		auto t = Clock::now();
+
+		std::chrono::duration<double, std::milli> dt = t - start;
+
+		start = t;
+
+		return dt.count();
+	}
+
+	using Clock     = std::chrono::high_resolution_clock;
+	using TimePoint = Clock::time_point;
+
+	TimePoint start;
+};

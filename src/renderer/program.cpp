@@ -3,63 +3,139 @@
 #include <iostream>
 #include <string>
 #include <unordered_map>
+#include <regex>
 
 std::unordered_map<std::string, Program> g_programsByName;
 
-inline u32 CompileShader(const std::string& filename, GLenum shaderType, const std::vector<std::string>& defines)
+inline std::string GetShaderFullPath(const char* filename)
 {
-	FILE* file = fopen(filename.data(), "r");
+	return std::string("resources/shaders/") + filename;
+}
+
+inline std::string GetFileContent(const char* filename)
+{
+	FILE* file = fopen(filename, "r");
 	if (!file)
 	{
-		return 0;
+		return "";
 	}
+
+	defer(fclose(file));
 
 	fseek(file, SEEK_SET, SEEK_END);
 	long filesize = ftell(file);
 	rewind(file);
 
-	std::string src;
-	src.resize(filesize);
-	filesize = (size_t)fread(src.data(), 1, filesize, file);
-	src.resize(filesize);
+	std::string fileContent;
+	fileContent.resize(filesize);
+	filesize = (size_t)fread(fileContent.data(), 1, filesize, file);
+	fileContent.resize(filesize);
 
-	fclose(file);
+	return fileContent;
+}
 
-	std::vector<std::string> completeShader;
-	completeShader.push_back("#version 450\n");
-	for (const auto& define : defines)
+inline std::string ParseShader(const char* input, int level = 0)
+{
+	// Tokenize string
+	std::vector<std::string> lines;
+
+	const char* ptr       = input;
+	const char* lineStart = input;
+
+	while (*ptr)
 	{
-		completeShader.push_back(std::string("#define ") + define.data() + "\n");
-	}
-	completeShader.push_back(std::move(src));
+		bool isNewLine = false;
 
-	char** finalSrc = new char*[completeShader.size()];
-	for (size_t i = 0; i < completeShader.size(); ++i)
-	{
-		finalSrc[i] = new char[completeShader[i].size() + 1];
-		strcpy(finalSrc[i], completeShader[i].data());
+		switch (*ptr)
+		{
+			case '\n':
+			{
+				isNewLine = true;
+				if (*(ptr + 1) == '\r')
+					++ptr;
+			}
+			break;
+
+			case '\r':
+			{
+				isNewLine = true;
+				if (*(ptr + 1) == '\n')
+					++ptr;
+			}
+			break;
+
+			default:
+				break;
+		}
+
+		++ptr;
+		if (isNewLine)
+		{
+			lines.emplace_back(lineStart, ptr);
+			lineStart = ptr;
+		}
 	}
+
+	lines.emplace_back(lineStart, ptr);
+
+	std::string content = "";
+
+	// Look for #includes
+	for (auto&& line : lines)
+	{
+		if (line.find("#include") != std::string::npos)
+		{
+			auto i = line.find_first_of("\"<");
+			auto j = line.find_last_of("\">");
+
+			auto filename = line.substr(i + 1, j - i - 1);
+
+			auto src = GetFileContent(GetShaderFullPath(filename.c_str()).c_str());
+			content += ParseShader(src.c_str(), level + 1);
+			content += "\n"; // Just in case
+		}
+		else
+		{
+			content += line;
+		}
+	}
+
+	return content;
+}
+
+inline u32 CompileShader(const char* filename, GLenum shaderType, const std::vector<const char*>& defines)
+{
+	std::string src = GetFileContent(filename);
+	if (src.empty())
+	{
+		return 0;
+	}
+
+	std::string completeShader = "#version 450\n";
+	for (const char* define : defines)
+	{
+		completeShader.append(std::string("#define ") + define + "\n");
+	}
+
+	completeShader.append(src);
+
+	std::string finalShader = ParseShader(completeShader.c_str());
+
+	const char* finalShaderData = finalShader.data();
 
 	u32 shader = glCreateShader(shaderType);
 
-	glShaderSource(shader, completeShader.size(), finalSrc, nullptr);
-	GLenum error = glGetError();
+	glShaderSource(shader, 1, &finalShaderData, nullptr);
 	glCompileShader(shader);
 
 	i32 compiled = GL_FALSE;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
 
-	for (size_t i = 0; i < completeShader.size(); ++i)
-	{
-		delete[] finalSrc[i];
-	}
-	delete[] finalSrc;
-
 	if (!compiled)
 	{
 		char error[512];
 		glGetShaderInfoLog(shader, 512, nullptr, error);
-		fprintf(stderr, "Could not compile shader %s: %s\n", filename.data(), error);
+		fprintf(stderr, "Could not compile shader %s: %s\n", filename, error);
 		glDeleteShader(shader);
 		shader = 0;
 	}
@@ -67,21 +143,21 @@ inline u32 CompileShader(const std::string& filename, GLenum shaderType, const s
 	return shader;
 }
 
-Program* Program::MakeRender(const std::string&              name,
-                             const std::string&              vsfile,
-                             const std::string&              fsfile,
-                             const std::vector<std::string>& defines)
+Program* Program::MakeRender(const char* name, const char* vsfile, const char* fsfile, const StringArray& defines)
 {
 	if (!g_programsByName.contains(name))
 	{
 		Program program(name);
 
-		program.m_defines = defines;
-		program.m_shaders.push_back({GL_VERTEX_SHADER, vsfile, std::filesystem::last_write_time(vsfile)});
+		program.m_defines   = defines;
+		std::string vshader = GetShaderFullPath(vsfile);
 
-		if (!fsfile.empty())
+		program.m_shaders.push_back({GL_VERTEX_SHADER, vshader.c_str(), std::filesystem::last_write_time(vshader.c_str())});
+
+		if (fsfile != nullptr && strcmp(fsfile, "") != 0)
 		{
-			program.m_shaders.push_back({GL_FRAGMENT_SHADER, fsfile, std::filesystem::last_write_time(fsfile)});
+			std::string fshader = GetShaderFullPath(fsfile);
+			program.m_shaders.push_back({GL_FRAGMENT_SHADER, fshader.c_str(), std::filesystem::last_write_time(fshader.c_str())});
 		}
 
 		program.Build();
@@ -92,13 +168,16 @@ Program* Program::MakeRender(const std::string&              name,
 	return &g_programsByName[name];
 }
 
-Program* Program::MakeCompute(const std::string& name, const std::string& csfile)
+Program* Program::MakeCompute(const char* name, const char* csfile, const StringArray& defines)
 {
 	if (!g_programsByName.contains(name))
 	{
 		Program program(name);
 
-		program.m_shaders.push_back({GL_COMPUTE_SHADER, csfile, std::filesystem::last_write_time(csfile)});
+		program.m_defines   = defines;
+		std::string cshader = GetShaderFullPath(csfile);
+
+		program.m_shaders.push_back({GL_COMPUTE_SHADER, cshader.c_str(), std::filesystem::last_write_time(cshader.c_str())});
 		program.Build();
 
 		g_programsByName[name] = program;
@@ -107,7 +186,7 @@ Program* Program::MakeCompute(const std::string& name, const std::string& csfile
 	return &g_programsByName[name];
 }
 
-Program* Program::GetProgramByName(const std::string& name)
+Program* Program::GetProgramByName(const char* name)
 {
 	if (g_programsByName.contains(name))
 	{
@@ -125,7 +204,7 @@ void Program::UpdateAllPrograms()
 	}
 }
 
-Program::Program(const std::string& name)
+Program::Program(const char* name)
     : m_name(name)
 {
 }
@@ -155,39 +234,39 @@ void Program::Bind()
 	glUseProgram(m_id);
 }
 
-void Program::SetUniform(const std::string& name, int32_t value) const
+void Program::SetUniform(const char* name, int32_t value) const
 {
 	glUniform1i(GetLocation(name), value);
 }
-void Program::SetUniform(const std::string& name, u32 value) const
+void Program::SetUniform(const char* name, u32 value) const
 {
 	glUniform1ui(GetLocation(name), value);
 }
-void Program::SetUniform(const std::string& name, f32 value) const
+void Program::SetUniform(const char* name, f32 value) const
 {
 	glUniform1f(GetLocation(name), value);
 }
-void Program::SetUniform(const std::string& name, const glm::vec2& value) const
+void Program::SetUniform(const char* name, const glm::vec2& value) const
 {
 	glUniform2fv(GetLocation(name), 1, &value[0]);
 }
-void Program::SetUniform(const std::string& name, const glm::vec3& value) const
+void Program::SetUniform(const char* name, const glm::vec3& value) const
 {
 	glUniform3fv(GetLocation(name), 1, &value[0]);
 }
-void Program::SetUniform(const std::string& name, const glm::vec4& value) const
+void Program::SetUniform(const char* name, const glm::vec4& value) const
 {
 	glUniform4fv(GetLocation(name), 1, &value[0]);
 }
-void Program::SetUniform(const std::string& name, const glm::mat2& value) const
+void Program::SetUniform(const char* name, const glm::mat2& value) const
 {
 	glUniformMatrix2fv(GetLocation(name), 1, false, &value[0][0]);
 }
-void Program::SetUniform(const std::string& name, const glm::mat3& value) const
+void Program::SetUniform(const char* name, const glm::mat3& value) const
 {
 	glUniformMatrix3fv(GetLocation(name), 1, false, &value[0][0]);
 }
-void Program::SetUniform(const std::string& name, const glm::mat4& value) const
+void Program::SetUniform(const char* name, const glm::mat4& value) const
 {
 	glUniformMatrix4fv(GetLocation(name), 1, false, &value[0][0]);
 }
@@ -200,7 +279,7 @@ void Program::Build()
 
 	for (const auto& shader : m_shaders)
 	{
-		GLuint shaderID = CompileShader(shader.filename, shader.type, m_defines);
+		GLuint shaderID = CompileShader(shader.filename.data(), shader.type, m_defines);
 		if (glIsShader(shaderID))
 		{
 			shaders.push_back(shaderID);
@@ -291,8 +370,8 @@ void Program::GetUniformInfos()
 	}
 }
 
-GLint Program::GetLocation(const std::string& name) const
+GLint Program::GetLocation(const char* name) const
 {
-	auto it = m_uniforms.find(name.data());
+	auto it = m_uniforms.find(name);
 	return (it == m_uniforms.end()) ? -1 : it->second;
 }

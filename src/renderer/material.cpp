@@ -1,10 +1,11 @@
 #include "material.h"
 
-Material::Material(const std::string& matName, const std::string& baseVS, const std::string& baseFS)
+Material::Material(const char* matName, const char* baseVS, const char* baseFS)
     : m_name(matName)
     , m_baseVS(baseVS)
     , m_baseFS(baseFS)
 {
+	(void)m_padding;
 }
 
 u32 Material::GetMask() const
@@ -36,7 +37,10 @@ void Material::Bind(Program* program, const Environment* env)
 	if (hasMetallic)
 		program->SetUniform("u_metallic", metallic);
 	if (hasEmissive)
+	{
 		program->SetUniform("u_emissive", emissive);
+		program->SetUniform("u_emissiveFactor", emissiveFactor);
+	}
 
 	GLint index = 0;
 
@@ -71,6 +75,7 @@ void Material::Bind(Program* program, const Environment* env)
 	if (hasEmissiveTexture)
 	{
 		program->SetUniform("s_emissive", index);
+		program->SetUniform("u_emissiveFactor", emissiveFactor);
 		glBindTextureUnit(index, emissiveTexture);
 		++index;
 	}
@@ -108,50 +113,23 @@ Program* Material::GetProgram() const
 	return Program::MakeRender(GetUniqueName().c_str(), m_baseVS.c_str(), m_baseFS.c_str(), GetDefines());
 }
 
-std::vector<std::string> Material::GetDefines() const
+std::vector<const char*> Material::GetDefines() const
 {
-	std::vector<std::string> defines;
+	std::vector<const char*> defines;
 
-	if (hasAlbedoTexture)
-	{
-		defines.push_back("HAS_ALBEDO_TEXTURE");
-	}
-	if (hasRoughness)
-	{
-		defines.push_back("HAS_ROUGHNESS");
-	}
-	if (hasMetallic)
-	{
-		defines.push_back("HAS_METALLIC");
-	}
-	if (hasRoughnessTexture)
-	{
-		defines.push_back("HAS_ROUGHNESS_TEXTURE");
-	}
-	if (hasMetallicTexture)
-	{
-		defines.push_back("HAS_METALLIC_TEXTURE");
-	}
-	if (hasMetallicRoughnessTexture)
-	{
-		defines.push_back("HAS_METALLIC_ROUGHNESS_TEXTURE");
-	}
-	if (hasEmissive)
-	{
-		defines.push_back("HAS_EMISSIVE");
-	}
-	if (hasEmissiveTexture)
-	{
-		defines.push_back("HAS_EMISSIVE_TEXTURE");
-	}
-	if (hasNormalMap)
-	{
-		defines.push_back("HAS_NORMAL_MAP");
-	}
-	if (hasAmbientOcclusionMap)
-	{
-		defines.push_back("HAS_AMBIENT_OCCLUSION_MAP");
-	}
+	// clang-format off
+	if (hasAlbedo)                   defines.push_back("HAS_ALBEDO");
+	if (hasAlbedoTexture)            defines.push_back("HAS_ALBEDO_TEXTURE");
+	if (hasRoughness)                defines.push_back("HAS_ROUGHNESS");
+	if (hasMetallic)                 defines.push_back("HAS_METALLIC");
+	if (hasRoughnessTexture)         defines.push_back("HAS_ROUGHNESS_TEXTURE");
+	if (hasMetallicTexture)          defines.push_back("HAS_METALLIC_TEXTURE");
+	if (hasMetallicRoughnessTexture) defines.push_back("HAS_METALLIC_ROUGHNESS_TEXTURE");
+	if (hasEmissive)                 defines.push_back("HAS_EMISSIVE");
+	if (hasEmissiveTexture)          defines.push_back("HAS_EMISSIVE_TEXTURE");
+	if (hasNormalMap)                defines.push_back("HAS_NORMAL_MAP");
+	if (hasAmbientOcclusionMap)      defines.push_back("HAS_AMBIENT_OCCLUSION_MAP");
+	// clang-format on
 
 	return defines;
 }

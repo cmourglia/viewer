@@ -92,6 +92,7 @@ struct Mesh
 {
 	GLuint  vao, buffer;
 	GLsizei indexCount;
+	GLsizei vertexCount;
 	GLenum  indexType;
 
 	Mesh();
@@ -164,11 +165,19 @@ struct CameraInfos
 	glm::vec3 position;
 };
 
+enum BackgroundType
+{
+	BackgroundType_None       = 0,
+	BackgroundType_Cubemap    = 1,
+	BackgroundType_Radiance   = 2,
+	BackgroundType_Irradiance = 3,
+};
+
 class Renderer
 {
 public:
 	void Initialize(const glm::vec2& initSize);
-	u32  Render(const CameraInfos& camera, const std::vector<Model>& models);
+	void Render(const CameraInfos& camera, const std::vector<Model>& models);
 
 	void Resize(const glm::vec2& newSize);
 
@@ -177,31 +186,40 @@ public:
 		return &m_environment;
 	}
 
+public:
+	i32 backgroundType     = BackgroundType_Cubemap;
+	i32 backgroundMipLevel = 0;
+
+	f32 bloomThreshold = 1.0f;
+	i32 bloomWidth     = 4;
+	f32 bloomAmount    = 1.0f;
+
+	u32 msaaRenderTexture;
+	u32 resolveTexture;
+	u32 msaaDepthRenderBuffer;
+
+	// Post-process textures
+	u32 bloomTextures[2];
+	u32 averageLuminanceTexture;
+
+	// Final render texture
+	u32 outputTexture;
+
 private:
 	glm::vec2 m_framebufferSize;
-	glm::vec2 m_bloomBufferSize;
 
 	u32 m_fbos[2];
-	u32 m_rts[3];
 
 #define m_msaaFB m_fbos[0]
 #define m_resolveFB m_fbos[1]
 
-	u32 m_msaaRenderTexture;
-	u32 m_resolveTexture;
-	u32 m_msaaDepthRenderBuffer;
-
-	// Post-process textures
-	u32 m_bloomTexture;
-	u32 m_averageLuminanceTexture;
-
-	// Final render texture
-	u32 m_outputTexture;
-
 	Program* m_backgroundProgram;
 
 	// Post-process compute shaders
-	Program* m_highPassProgram;
+	Program* m_highpassProgram;
+	Program* m_blurXProgram;
+	Program* m_blurYProgram;
+	Program* m_upsampleProgram;
 	Program* m_outputProgram;
 
 	Environment m_environment;

@@ -1,30 +1,28 @@
 #include "core/defines.h"
 #include "core/utils.h"
+
 #include "renderer/program.h"
 #include "renderer/material.h"
 #include "renderer/environment.h"
 #include "renderer/render_primitives.h"
 #include "renderer/renderer.h"
+#include "renderer/texture.h"
+#include "renderer/frame_stats.h"
+
+#include "assets/asset.h"
 
 #include <glad/glad.h>
-#include <glfw/glfw3.h>
+#include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-
-#include <stb_image.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include "imfilebrowser.h"
-
-#include <assimp/Importer.hpp>
-#include <assimp/scene.h>
-#include <assimp/postprocess.h>
-#include <assimp/pbrmaterial.h>
 
 #include <vector>
 #include <filesystem>
@@ -84,271 +82,17 @@ struct Camera
 	}
 };
 
-static std::unordered_map<u32, Program>        g_programs;
-static std::unordered_map<std::string, GLuint> g_textures;
-
-GLuint LoadTexture(const std::string& filename)
-{
-	auto it = g_textures.find(filename);
-	if (it != g_textures.end())
-	{
-		return it->second;
-	}
-
-	stbi_set_flip_vertically_on_load(true);
-
-	i32      w, h, c;
-	uint8_t* data = stbi_load(filename.c_str(), &w, &h, &c, 0);
-
-	stbi_set_flip_vertically_on_load(false);
-
-	if (data == nullptr)
-	{
-		return 0;
-	}
-
-	GLuint texture;
-	glCreateTextures(GL_TEXTURE_2D, 1, &texture);
-
-	const i32 levels = log2f(Min(w, h));
-
-	GLenum format, internalFormat;
-	switch (c)
-	{
-		case 1:
-			format         = GL_R;
-			internalFormat = GL_R8;
-			break;
-		case 2:
-			format         = GL_RG;
-			internalFormat = GL_RG8;
-			break;
-		case 3:
-			format         = GL_RGB;
-			internalFormat = GL_RGB8;
-			break;
-		case 4:
-			format         = GL_RGBA;
-			internalFormat = GL_RGBA8;
-			break;
-	}
-
-	glTextureStorage2D(texture, levels, internalFormat, w, h);
-	glTextureSubImage2D(texture, 0, 0, 0, w, h, format, GL_UNSIGNED_BYTE, data);
-	glGenerateTextureMipmap(texture);
-
-	stbi_image_free(data);
-
-	g_textures.insert(std::make_pair(filename, texture));
-
-	return texture;
-}
-
-static Camera g_camera;
-
 void SetupUI(GLFWwindow* window);
 void RenderUI(const std::vector<Model>& models);
 
-f32 g_lastScroll = 0.0f;
+[[clang::no_destroy]] global_variable std::unordered_map<u32, Program> g_programs;
 
-f64 g_viewportX = 0.0, g_viewportY = 0.0;
-f64 g_viewportW = 0.0, g_viewportH = 0.0;
-
-static std::vector<Model> g_models;
-
-Mesh* ProcessMesh(aiMesh* inputMesh, const aiScene* scene)
-{
-	std::vector<Vertex> vertices;
-	std::vector<u32>    indices;
-
-	vertices.reserve(inputMesh->mNumVertices);
-	indices.reserve(inputMesh->mNumFaces * 3);
-
-	const aiVector3D* inVertices  = inputMesh->mVertices;
-	const aiVector3D* inNormals   = inputMesh->mNormals;
-	const aiVector3D* inTexcoords = inputMesh->mTextureCoords[0];
-
-	for (u32 index = 0; index < inputMesh->mNumVertices; ++index)
-	{
-		const aiVector3D v = *inVertices++;
-		const aiVector3D n = *inNormals++;
-
-		Vertex vertex;
-		vertex.position = {v.x, v.y, v.z};
-		vertex.normal   = {n.x, n.y, n.z};
-
-		if (inTexcoords)
-		{
-			const aiVector3D t = *inTexcoords++;
-			vertex.texcoord    = {t.x, t.y};
-		}
-
-		vertices.push_back(vertex);
-	}
-
-	const aiFace* inFaces = inputMesh->mFaces;
-	for (u32 i = 0; i < inputMesh->mNumFaces; ++i)
-	{
-		const aiFace face = *inFaces++;
-		for (u32 j = 0; j < face.mNumIndices; ++j)
-		{
-			indices.push_back(face.mIndices[j]);
-		}
-	}
-
-	Mesh* mesh = new Mesh(vertices, indices);
-
-	return mesh;
-}
-
-std::string TexturePath(const char* texture, const std::filesystem::path& path)
-{
-	std::filesystem::path texturePath(texture);
-	if (texturePath.is_absolute())
-	{
-		return texturePath.string();
-	}
-
-	std::filesystem::path fullPath = path / texturePath;
-
-	return fullPath.string();
-}
-
-Material* ProcessMaterial(aiMaterial* inputMaterial, const aiScene* scene, const std::filesystem::path& path)
-{
-	Material* material = new Material(inputMaterial->GetName().C_Str(), "resources/shaders/pbr.vert", "resources/shaders/pbr.frag");
-
-	aiColor3D albedo;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_BASE_COLOR, albedo))
-	{
-		material->hasAlbedo = true;
-		material->albedo    = glm::vec3(albedo.r, albedo.g, albedo.b);
-	}
-
-	f32 metallic;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_METALLIC_FACTOR, metallic))
-	{
-		material->hasMetallic = true;
-		material->metallic    = metallic;
-	}
-
-	f32 roughness;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness))
-	{
-		material->hasRoughness = true;
-		material->roughness    = roughness;
-	}
-
-	aiString albedoTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_BASE_COLOR_TEXTURE, &albedoTexture))
-	{
-		material->hasAlbedoTexture = true;
-		material->albedoTexture    = LoadTexture(TexturePath(albedoTexture.C_Str(), path));
-	}
-
-	aiString metallicTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_METALLIC_TEXTURE, &metallicTexture))
-	{
-		material->hasMetallicTexture = true;
-		material->metallicTexture    = LoadTexture(TexturePath(metallicTexture.C_Str(), path));
-	}
-
-	aiString roughnessTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_ROUGHNESS_TEXTURE, &roughnessTexture))
-	{
-		material->hasRoughnessTexture = true;
-		material->roughnessTexture    = LoadTexture(TexturePath(roughnessTexture.C_Str(), path));
-	}
-
-	aiString metallicRoughnessTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE, &metallicRoughnessTexture))
-	{
-		material->hasMetallicRoughnessTexture = true;
-		material->metallicRoughnessTexture    = LoadTexture(TexturePath(metallicRoughnessTexture.C_Str(), path));
-	}
-
-	aiColor3D emissiveColor;
-	if (AI_SUCCESS == inputMaterial->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor))
-	{
-		material->hasEmissive = true;
-		material->emissive    = glm::vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
-	}
-
-	aiString emissiveTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(aiTextureType_EMISSIVE, 0, &emissiveTexture))
-	{
-		material->hasEmissiveTexture = true;
-		material->emissiveTexture    = LoadTexture(TexturePath(emissiveTexture.C_Str(), path));
-	}
-
-	aiString occlusionTexture;
-	if (AI_SUCCESS == inputMaterial->GetTexture(aiTextureType_LIGHTMAP, 0, &occlusionTexture))
-	{
-		material->hasAmbientOcclusionMap = true;
-		material->ambientOcclusionMap    = LoadTexture(TexturePath(occlusionTexture.C_Str(), path));
-	}
-
-	return material;
-}
-
-void ProcessNode(aiNode* node, const aiScene* scene, const glm::mat4& parentTransform, const std::filesystem::path& path)
-{
-	const auto& mat = node->mTransformation;
-
-	// clang-format off
-	const glm::mat4 nodeTransform(mat.a1, mat.b1, mat.c1, mat.d1,
-	                              mat.a2, mat.b2, mat.c2, mat.d2,
-	                              mat.a3, mat.b3, mat.c3, mat.d3,
-	                              mat.a4, mat.b4, mat.c4, mat.d4);
-	// clang-format on
-
-	const glm::mat4 transform = parentTransform * nodeTransform;
-
-	for (u32 index = 0; index < node->mNumMeshes; ++index)
-	{
-		Model model;
-
-		aiMesh*     inputMesh     = scene->mMeshes[node->mMeshes[index]];
-		aiMaterial* inputMaterial = scene->mMaterials[inputMesh->mMaterialIndex];
-
-		model.mesh           = ProcessMesh(scene->mMeshes[node->mMeshes[index]], scene);
-		model.material       = ProcessMaterial(inputMaterial, scene, path);
-		model.worldTransform = transform;
-		g_models.push_back(model);
-	}
-
-	for (u32 index = 0; index < node->mNumChildren; ++index)
-	{
-		ProcessNode(node->mChildren[index], scene, transform, path);
-	}
-}
-
-void LoadScene(const char* filename)
-{
-	Assimp::Importer importer;
-
-	const u32 importerFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace | aiProcess_OptimizeMeshes;
-	const aiScene* scene    = importer.ReadFile(filename, importerFlags);
-
-	if ((nullptr == scene) || (0 != scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || (nullptr == scene->mRootNode))
-	{
-		fprintf(stderr, "Could not load file %s\n", filename);
-		return;
-	}
-
-	std::filesystem::path p;
-	p = filename;
-	p.remove_filename();
-	ProcessNode(scene->mRootNode, scene, glm::mat4(1.0f), p);
-}
-
-static Program* g_backgroundProgram;
-static Mesh     g_cubeMesh;
-
-glm::vec3 g_lightDirection    = glm::vec3(0, -1, 0);
-bool      g_showIrradianceMap = false;
-
-Environment* g_env;
+[[clang::no_destroy]] global_variable Camera g_camera;
+// [[clang::no_destroy]] global_variable f32    g_lastScroll = 0.0f;
+[[clang::no_destroy]] global_variable f32 g_viewportX = 0.0f, g_viewportY = 0.0f;
+[[clang::no_destroy]] global_variable f32 g_viewportW = 0.0f, g_viewportH = 0.0f;
+[[clang::no_destroy]] global_variable std::vector<Model> g_models = {};
+[[clang::no_destroy]] global_variable Environment* g_env;
 
 i32 main()
 {
@@ -398,23 +142,37 @@ i32 main()
 
 	LoadEnvironment("resources/env/Frozen_Waterfall_Ref.hdr", g_env);
 
-	// LoadScene("external/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf");
-	LoadScene(R"(W:\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
+	g_models = LoadScene(R"(external\glTF-Sample-Models\2.0\DamagedHelmet\glTF\DamagedHelmet.gltf)");
+	// LoadScene(R"(external\glTF-Sample-Models\2.0\MetalRoughSpheres\glTF\MetalRoughSpheres.gltf)");
 
 	ImGui::FileBrowser textureDialog;
 	textureDialog.SetTitle("Open texture...");
 	textureDialog.SetTypeFilters({".png", ".jpg", ".jpeg", ".tiff"});
 
+	static glm::vec2 lastSize(0, 0);
+
+	static glm::mat4 cameraProj = glm::mat4(1.0f);
+
 	while (!glfwWindowShouldClose(window))
 	{
+		if (lastSize.x != 0 && lastSize.y != 0)
+		{
+			CameraInfos cameraInfos = {
+			    .view     = g_camera.GetView(),
+			    .proj     = cameraProj,
+			    .position = g_camera.position,
+			};
+			renderer.Render(cameraInfos, g_models);
+		}
+
 		ImGuiIO& io = ImGui::GetIO();
 
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
 
-		static bool               showDemo        = true;
 		static ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_None;
+		static GLuint*            selectedTexture;
 
 		// We are using the ImGuiWindowFlags_NoDocking flag to make the parent window not dockable into,
 		// because it would be confusing to have two docking targets within each others.
@@ -452,7 +210,7 @@ i32 main()
 		{
 			ImGui::DockBuilderRemoveNode(dockspace_id);
 			ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-			ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2(g_width, g_height));
+			ImGui::DockBuilderSetNodeSize(dockspace_id, ImVec2((f32)g_width, (f32)g_height));
 
 			ImGuiID dockMainID  = dockspace_id;
 			ImGuiID dockIDLeft  = ImGui::DockBuilderSplitNode(dockMainID, ImGuiDir_Left, 0.20f, nullptr, &dockMainID);
@@ -465,128 +223,272 @@ i32 main()
 		}
 
 		ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
-
-		ImGui::Begin("Viewport");
 		{
-			ImVec2 vMin = ImGui::GetWindowContentRegionMin();
-			ImVec2 vMax = ImGui::GetWindowContentRegionMax();
-
-			vMin.x += ImGui::GetWindowPos().x;
-			vMin.y += ImGui::GetWindowPos().y;
-			vMax.x += ImGui::GetWindowPos().x;
-			vMax.y += ImGui::GetWindowPos().y;
-
-			i32 wx, wy;
-			glfwGetWindowPos(window, &wx, &wy);
-
-			vMin.x -= wx;
-			vMin.y -= wy;
-			vMax.x -= wx;
-			vMax.y -= wy;
-
-			g_viewportX = vMin.x;
-			g_viewportY = vMin.y;
-			g_viewportW = vMax.x - vMin.x;
-			g_viewportH = vMax.y - vMin.y;
-
-			static glm::vec2 lastSize(0, 0);
-			const glm::vec2  size(g_viewportW, g_viewportH);
-
-			if (size != lastSize)
+			ImGui::Begin("Viewport");
 			{
-				renderer.Resize(size);
-				lastSize = size;
-			}
+				ImVec2 vMin = ImGui::GetWindowContentRegionMin();
+				ImVec2 vMax = ImGui::GetWindowContentRegionMax();
 
-			CameraInfos cameraInfos = {
-			    .view     = g_camera.GetView(),
-			    .proj     = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.001f, 100.0f),
-			    .position = g_camera.position,
-			};
+				vMin.x += ImGui::GetWindowPos().x;
+				vMin.y += ImGui::GetWindowPos().y;
+				vMax.x += ImGui::GetWindowPos().x;
+				vMax.y += ImGui::GetWindowPos().y;
 
-			ImTextureID id;
-			switch (g_renderMode)
-			{
-				default:
-					id = (void*)(intptr_t)renderer.Render(cameraInfos, g_models);
-					ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
-			}
-			// ImTextureID
-		}
-		ImGui::End();
+				i32 wx, wy;
+				glfwGetWindowPos(window, &wx, &wy);
 
-		static i32 selectedEntity = -1;
+				vMin.x -= (f32)wx;
+				vMin.y -= (f32)wy;
+				vMax.x -= (f32)wx;
+				vMax.y -= (f32)wy;
 
-		ImGui::Begin("Entities");
-		{
-			for (i32 i = 0; i < g_models.size(); ++i)
-			{
-				char buf[32];
-				sprintf(buf, "Entity #%d", i);
-				if (ImGui::Selectable(buf, selectedEntity == i))
+				g_viewportX = vMin.x;
+				g_viewportY = vMin.y;
+				g_viewportW = vMax.x - vMin.x;
+				g_viewportH = vMax.y - vMin.y;
+
+				glm::vec2 size(g_viewportW, g_viewportH);
+
+				if (size != lastSize)
 				{
-					selectedEntity = i;
-				}
-			}
-		}
-		ImGui::End();
-
-		ImGui::Begin("Light");
-		{
-			ImGui::Checkbox("Show irradiance map", &g_showIrradianceMap);
-			ImGui::InputFloat3("Light direction", &g_lightDirection.x);
-		}
-		ImGui::End();
-
-		static GLuint* selectedTexture;
-
-		ImGui::Begin("Properties");
-		if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen))
-		{
-			if (selectedEntity >= 0 && selectedEntity < g_models.size())
-			{
-				ImGui::LabelText("Hello", "World");
-				Model*    model    = &g_models[selectedEntity];
-				Material* material = model->material;
-
-				ImGui::Checkbox("Albedo", &material->hasAlbedo);
-				if (material->hasAlbedo)
-				{
-					ImGui::ColorEdit3("Albedo", &material->albedo.x);
+					cameraProj = glm::perspective(60.0f * ToRadians, (f32)size.x / size.y, 0.1f, 5000.0f), renderer.Resize(size);
+					lastSize   = size;
 				}
 
-				ImGui::Checkbox("Albedo texture", &material->hasAlbedoTexture);
-				if (material->hasAlbedoTexture)
+				ImTextureID id;
+				switch (g_renderMode)
 				{
-					if (ImGui::ImageButton((void*)(intptr_t)material->albedoTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+					default:
+						id = (void*)(intptr_t)renderer.outputTexture;
+						ImGui::Image(id, ImVec2(size.x, size.y), ImVec2(0, 1), ImVec2(1, 0));
+				}
+				// ImTextureID
+			}
+			ImGui::End();
+
+			static i32 selectedEntity = -1;
+
+			ImGui::Begin("Entities");
+			{
+				for (i32 i = 0; i < g_models.size(); ++i)
+				{
+					char buf[32];
+					sprintf(buf, "Entity #%d", i);
+					if (ImGui::Selectable(buf, selectedEntity == i))
 					{
-						selectedTexture = &material->albedoTexture;
-						textureDialog.Open();
-					}
-				}
-
-				ImGui::Checkbox("Emissive", &material->hasEmissive);
-				if (material->hasEmissive)
-				{
-					ImGui::ColorEdit3("Emissive", &material->emissive.x);
-				}
-
-				ImGui::Checkbox("Emissive texture", &material->hasEmissiveTexture);
-				if (material->hasEmissiveTexture)
-				{
-					if (ImGui::ImageButton((void*)(intptr_t)material->emissiveTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
-					{
-						selectedTexture = &material->emissiveTexture;
-						textureDialog.Open();
+						selectedEntity = i;
 					}
 				}
 			}
+			ImGui::End();
+
+			ImGui::Begin("Light");
+			{
+				ImGui::Text("Background");
+				ImGui::RadioButton("None", &renderer.backgroundType, BackgroundType_None);
+				ImGui::RadioButton("Cubemap", &renderer.backgroundType, BackgroundType_Cubemap);
+				ImGui::RadioButton("Irradiance", &renderer.backgroundType, BackgroundType_Irradiance);
+				ImGui::RadioButton("Radiance", &renderer.backgroundType, BackgroundType_Radiance);
+
+				if (renderer.backgroundType == BackgroundType_Radiance) // Radiance ?
+				{
+					ImGui::SliderInt("Mip level", &renderer.backgroundMipLevel, 0, 8);
+				}
+			}
+			ImGui::End();
+
+			ImGui::Begin("Post-Process");
+			{
+				ImGui::Text("A post-process effect");
+
+				ImGui::Separator();
+
+				ImGui::Text("Bloom parameters");
+				ImGui::DragFloat("Highpass Threshold", &renderer.bloomThreshold, 1.0f, 0.0f, 10.0f, "%.0f");
+				ImGui::SliderInt("Blur radius", &renderer.bloomWidth, 1, 6);
+				ImGui::DragFloat("Bloom amount", &renderer.bloomAmount, 0.1f, 0.0f, 3.0f, "%.1f");
+
+				ImGui::Separator();
+
+				ImGui::Text("Another post-process effect");
+			}
+			ImGui::End();
+
+			ImGui::Begin("Properties");
+			if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (selectedEntity >= 0 && selectedEntity < g_models.size())
+				{
+					Model*    model    = &g_models[selectedEntity];
+					Material* material = model->material;
+
+					ImGui::Checkbox("Albedo", &material->hasAlbedo);
+					if (material->hasAlbedo)
+					{
+						ImGui::ColorEdit3("Albedo", &material->albedo.x);
+					}
+
+					ImGui::Checkbox("Albedo texture", &material->hasAlbedoTexture);
+					if (material->hasAlbedoTexture)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->albedoTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->albedoTexture;
+							textureDialog.Open();
+						}
+					}
+
+					// ImGui::Checkbox("Roughness", &material->hasRoughness);
+					// if (material->hasRoughness)
+					// {
+					// ImGui::SameLine();
+					ImGui::SliderFloat("Roughness", &material->roughness, 0.0f, 1.0f);
+					// }
+
+					ImGui::Checkbox("Roughness texture", &material->hasRoughnessTexture);
+					if (material->hasRoughnessTexture)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->roughnessTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->roughnessTexture;
+							textureDialog.Open();
+						}
+					}
+
+					// ImGui::Checkbox("Metallic", &material->hasMetallic);
+					// if (material->hasMetallic)
+					// {
+					// ImGui::SameLine();
+					ImGui::SliderFloat("Metallic", &material->metallic, 0.0f, 1.0f);
+					// }
+
+					ImGui::Checkbox("Metallic texture", &material->hasMetallicTexture);
+					if (material->hasMetallicTexture)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->metallicTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->metallicTexture;
+							textureDialog.Open();
+						}
+					}
+
+					ImGui::Checkbox("Metallic - Roughness texture", &material->hasMetallicRoughnessTexture);
+					if (material->hasMetallicRoughnessTexture)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->metallicRoughnessTexture,
+						                       ImVec2(64, 64),
+						                       ImVec2(0, 1),
+						                       ImVec2(1, 0)))
+						{
+							selectedTexture = &material->metallicRoughnessTexture;
+							textureDialog.Open();
+						}
+					}
+
+					ImGui::Checkbox("Emissive", &material->hasEmissive);
+					if (material->hasEmissive)
+					{
+						ImGui::ColorEdit3("Emissive", &material->emissive.x);
+					}
+
+					ImGui::Checkbox("Emissive texture", &material->hasEmissiveTexture);
+					if (material->hasEmissiveTexture)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->emissiveTexture, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->emissiveTexture;
+							textureDialog.Open();
+						}
+					}
+
+					if (material->hasEmissive || material->hasEmissiveTexture)
+					{
+						ImGui::SliderFloat("Emissive factor", &material->emissiveFactor, 0.0f, 10.0f);
+					}
+
+					ImGui::Checkbox("Normal map", &material->hasNormalMap);
+					if (material->hasNormalMap)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->normalMap, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->normalMap;
+							textureDialog.Open();
+						}
+					}
+
+					ImGui::Checkbox("AO map", &material->hasAmbientOcclusionMap);
+					if (material->hasAmbientOcclusionMap)
+					{
+						if (ImGui::ImageButton((void*)(intptr_t)material->ambientOcclusionMap, ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0)))
+						{
+							selectedTexture = &material->ambientOcclusionMap;
+							textureDialog.Open();
+						}
+					}
+				}
+			}
+			ImGui::End();
+
+			ImGui::Begin("Stats");
+			{
+				FrameStats* stats = FrameStats::Get();
+
+				ImGui::Text("Startup");
+				ImGui::Text("\tIBL");
+				ImGui::Text("\t\tDFG Precompute: %.1lfms", stats->ibl.precomputeDFG);
+				ImGui::Text("\t\tEnvironment total: %.1lfms", stats->ibl.total);
+				ImGui::Text("\t\tLoad texture: %.1lfms", stats->ibl.loadTexture);
+				ImGui::Text("\t\tGenerate cubemap: %.1lfms", stats->ibl.cubemap);
+				ImGui::Text("\t\tPrefilter specular: %.1lfms", stats->ibl.prefilter);
+				ImGui::Text("\t\tIrradiance convolution: %.1lfms", stats->ibl.irradiance);
+				ImGui::Text("\tScene");
+				ImGui::Text("\t\tLoad time: %.1lfms", stats->loadScene);
+
+				ImGui::Separator();
+
+				ImGui::Text("Frame");
+				ImGui::Text("\tTotal frame time: %.1lfms", stats->frameTotal);
+				ImGui::Text("\tTotal frame render time: %.1lfms", stats->renderTotal);
+
+				ImGui::Text("\tGeneral");
+				ImGui::Text("\t\tUpdate programs: %.3lfms", stats->frame.updatePrograms);
+				ImGui::Text("\tRendering");
+				ImGui::Text("\t\tzPrepass: %.3lfms", stats->frame.zPrepass);
+				ImGui::Text("\t\tRender models: %.3lfms", stats->frame.renderModels);
+				ImGui::Text("\t\tRender envmap: %.3lfms", stats->frame.background);
+				ImGui::Text("\t\tResolve MSAA: %.3lfms", stats->frame.resolveMSAA);
+				ImGui::Text("\tPost-Process");
+				ImGui::Text("\t\tLuminance + bloom threshold: %.3lfms", stats->frame.highpassAndLuminance);
+				ImGui::Text("\t\tBloom total: %.3lfms", stats->frame.bloomTotal);
+				ImGui::Text("\t\tBloom downsample: %.3lfms", stats->frame.bloomDownsample);
+				ImGui::Text("\t\tBloom upsample: %.3lfms", stats->frame.bloomUpsample);
+				ImGui::Text("\t\tFinal compositing: %.3lfms", stats->frame.finalCompositing);
+
+				ImGui::Text("\tImGui");
+				ImGui::Text("\t\tGui description: %.1lfms", stats->imguiDesc);
+				ImGui::Text("\t\tGui rendering: %.1lfms", stats->imguiRender);
+
+				ImGui::Separator();
+
+				ImGui::Text("Render stats");
+				ImGui::Text("Drawing %d models", (i32)g_models.size());
+				i64 vertexTotal   = 0;
+				i64 triangleTotal = 0;
+				for (i32 i = 0; i < g_models.size(); ++i)
+				{
+					i64 vertexCount   = g_models[i].mesh->vertexCount;
+					i64 triangleCount = g_models[i].mesh->indexCount / 3;
+					ImGui::Text("\tModel %d has %lld vertices and %lld triangles", i, vertexCount, triangleCount);
+					vertexTotal += vertexCount;
+					triangleTotal += triangleCount;
+				}
+				ImGui::Text("Totalizing %lld vertices and %lld triangles", vertexTotal, triangleTotal);
+			}
+			ImGui::End();
+
+			static bool show = true;
+			ImGui::ShowDemoWindow(&show);
 		}
-		ImGui::End();
-
-		static bool opened = true;
-		ImGui::ShowDemoWindow(&opened);
-
 		ImGui::End();
 
 		textureDialog.Display();
@@ -691,7 +593,7 @@ static void WheelCallback(GLFWwindow* window, f64 x, f64 y)
 		if (inViewport(mouseX, mouseY))
 		{
 			constexpr f32 minDistance = 0.01f;
-			constexpr f32 maxDistance = 100.0f;
+			constexpr f32 maxDistance = 1000.0f;
 
 			const f32 multiplier = 2.5f * (g_camera.distance - minDistance) / (maxDistance - minDistance);
 
@@ -741,8 +643,7 @@ static void DropCallback(GLFWwindow* window, i32 count, const char** paths)
 		}
 		else
 		{
-			g_models.clear();
-			LoadScene(paths[i]);
+			g_models = LoadScene(paths[i]);
 		}
 	}
 }

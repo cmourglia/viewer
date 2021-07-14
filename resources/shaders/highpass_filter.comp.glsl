@@ -1,9 +1,9 @@
-layout (local_size_x = 16, local_size_y = 16) in;
+layout (local_size_x = 32, local_size_y = 32) in;
 
-layout (rgba32f, location = 0) readonly restrict uniform sampler2D input_image;
-layout (rgba32f, binding = 0) writeonly restrict uniform image2D output_image;
+layout (rgba32f, binding = 0) readonly restrict uniform image2D input_image;
+layout (rgba32f, binding = 1) writeonly restrict uniform image2D output_image;
 
-uniform vec2 viewportSize;
+uniform float threshold;
 
 vec3 convertRGB2XYZ(vec3 color)
 {
@@ -55,17 +55,20 @@ vec3 convertYxy2RGB(vec3 color)
 	return convertXYZ2RGB(convertYxy2XYZ(color) );
 }
 
+#include "base_math.glsl"
+
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
-    vec2 texcoords = vec2(texel) / viewportSize;
 
-    vec3 color = texture(input_image, texcoords).rgb;
+	ivec2 inTexel = texel * 2;
+
+    vec4 row0 = mix(imageLoad(input_image, inTexel), imageLoad(input_image, inTexel + ivec2(1, 0)), 0.5);
+	vec4 row1 = mix(imageLoad(input_image, inTexel + ivec2(0, 1)), imageLoad(input_image, inTexel + ivec2(1, 1)), 0.5);
+	vec3 color = mix(row0, row1, 0.5).rgb;
 
     float luminance = convertRGB2Yxy(color).r;
+	float bloomLuminance = luminance - threshold;
+	float bloomAmount = saturate(bloomLuminance);
 
-    if (luminance > 1.0) {
-        imageStore(output_image, texel, vec4(color, 1.0));
-    } else {
-        imageStore(output_image, texel, vec4(0.0, 0.0, 0.0, 1.0));
-    }
+	imageStore(output_image, texel, vec4(color * bloomAmount, 1.0));
 }

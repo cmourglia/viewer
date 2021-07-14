@@ -13,3 +13,34 @@ using u64 = uint64_t;
 
 using f32 = float;
 using f64 = double;
+
+// Macro helpers
+#define global_variable static
+#define local_variable static
+
+// https://www.gingerbill.org/article/2015/08/19/defer-in-cpp
+template <typename Fn>
+struct PrivDefer
+{
+	Fn fn;
+
+	PrivDefer(Fn fn)
+	    : fn(fn)
+	{
+	}
+	~PrivDefer()
+	{
+		fn();
+	}
+};
+
+template <typename Fn>
+PrivDefer<Fn> DeferFunc(Fn fn)
+{
+	return PrivDefer<Fn>(fn);
+}
+
+#define DEFER_1(x, y) x##y
+#define DEFER_2(x, y) DEFER_1(x, y)
+#define DEFER_3(x) DEFER_2(x, __COUNTER__)
+#define defer(code) auto DEFER_3(_defer_) = DeferFunc([&]() { code; })
