@@ -1,0 +1,11 @@
+Model Information:
+* title:	Body blocking,Stylized Male
+* source:	https://sketchfab.com/3d-models/body-blockingstylized-male-2f9b367d9842411699df3f235ba3d4db
+* author:	Nooxy (https://sketchfab.com/Nooxy)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Body blocking,Stylized Male" (https://sketchfab.com/3d-models/body-blockingstylized-male-2f9b367d9842411699df3f235ba3d4db) by Nooxy (https://sketchfab.com/Nooxy) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
